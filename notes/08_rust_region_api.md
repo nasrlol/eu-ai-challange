@@ -108,3 +108,5 @@ Region = `{"type":"bbox","bbox":[w,s,e,n]}` | `{"type":"aoi","aoi":"EMSR517_AOI1
 - AOI regions (`/flood`, `/timeline`, `/evacuation`) and `/impact`: AOI checked in Rust first, needs `_DEL`/`_GRA` (else 422), unknown → 404.
 - `/evacuation`: `T=` must be finite; duplicate hours / weathers dropped; `observed` (flood or roads_flood) needs an AOI region; `/flood` same guard.
 - CORS (`tower-http` 0.5 `CorsLayer`, main.rs `cors()`): all routes incl. `/help/*`, `/files`; methods GET/POST/PATCH, header content-type. Origins from env `FLOOD_CORS_ORIGINS` (comma list, default `*`); bad origin → server refuses to start. Tested: OPTIONS preflight → `access-control-allow-*`; with a list, unlisted origins get no allow-origin header. Tighten before any public deploy.
+- `/flood` `files.danger` / `files.evacuation` list only this request's floods (label = `flood_label`: `risk>=0.5` → `risk_ge_0.5`); older CSVs in a reused folder are left on disk but not listed. `/timeline`, `/evacuation` return fixed file names (no globbing).
+- `/impact`: `cost_eur_m2`, `max_depth_m` must be finite and > 0 → else 422 (−5 gave a negative € loss).

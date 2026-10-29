@@ -20,7 +20,8 @@ pub struct Models {
 const ROAD_DAMAGE_NOTE: &str = "Road damage model trained on CEMS grading maps, leave-one-area-out; \
     damage_prob is not calibrated. Impassable = EFAS depth >= 0.3 m.";
 
-fn check_name(name: &str) -> Result<()> {
+/// Output / zone names: letters, digits, _ or -
+pub fn check_name(name: &str) -> Result<()> {
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || "_-".contains(c)) {
         bail!("name must be letters, digits, _ or -");
     }
@@ -181,15 +182,16 @@ fn flood(m: &Models, req: FloodReq) -> Result<Value> {
     m.python("flood_tool.py", &args)?;
     let dir = m.out().join("regions").join(&req.name);
     let mut summary: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("summary.json"))?)?;
-    // per-flood tables: danger_<flood>.csv (factors) and evacuation_<flood>.csv (ranked cells)
+    // per-flood tables of THIS request (the folder may hold older runs under the same name):
+    // danger_<label>.csv (factors), evacuation_<label>.csv (ranked cells); label as in
+    // access_model.flood_label, e.g. risk>=0.5 → risk_ge_0.5
     let (mut danger, mut evac) = (Map::new(), Map::new());
-    for f in std::fs::read_dir(&dir)?.flatten() {
-        let n = f.file_name().to_string_lossy().into_owned();
-        if let Some(stem) = n.strip_suffix(".csv") {
-            if let Some(k) = stem.strip_prefix("danger_") {
-                danger.insert(k.into(), json!(f.path()));
-            } else if let Some(k) = stem.strip_prefix("evacuation_") {
-                evac.insert(k.into(), json!(f.path()));
+    for f in &req.floods {
+        let label = f.replace(">=", "_ge_");
+        for (map, prefix) in [(&mut danger, "danger"), (&mut evac, "evacuation")] {
+            let path = dir.join(format!("{prefix}_{label}.csv"));
+            if path.exists() {
+                map.insert(label.clone(), json!(path));
             }
         }
     }
@@ -348,6 +350,9 @@ fn cost() -> f64 { 1500.0 }
 fn max_depth() -> f64 { 6.0 }
 
 fn impact(m: &Models, req: ImpactReq) -> Result<Value> {
+    if !(req.cost_eur_m2.is_finite() && req.cost_eur_m2 > 0.0) || !(req.max_depth_m.is_finite() && req.max_depth_m > 0.0) {
+        bail!("cost_eur_m2 and max_depth_m must be positive numbers");
+    }
     let folder = m.cems_folder(&req.aoi)?;
     let dir = m.out().join("impact");
     std::fs::create_dir_all(&dir)?;

@@ -11,7 +11,8 @@ mod roads;
 mod types;
 
 use anyhow::{bail, Context, Result};
-use axum::{http::StatusCode, routing::{get, post}, Json, Router};
+use axum::{http::{header, HeaderValue, Method, StatusCode}, routing::{get, post}, Json, Router};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use features::{FEATURES, GRID_M};
 use geo::{Contains, LineString, Point, Polygon};
 use serde::Deserialize;
@@ -217,21 +218,39 @@ async fn blocking(f: impl FnOnce() -> Result<Value> + Send + 'static) -> (Status
     }
 }
 
+/// CORS for browser frontends on every route: origins from FLOOD_CORS_ORIGINS (comma list,
+/// default "*" = any; tighten it if the API is ever public)
+fn cors() -> Result<CorsLayer> {
+    let origins = std::env::var("FLOOD_CORS_ORIGINS").unwrap_or_else(|_| "*".into());
+    let allow = if origins.trim() == "*" {
+        AllowOrigin::any()
+    } else {
+        let list = origins.split(',').map(str::trim).filter(|o| !o.is_empty())
+            .map(|o| HeaderValue::from_str(o).with_context(|| format!("FLOOD_CORS_ORIGINS: bad origin {o:?}")))
+            .collect::<Result<Vec<_>>>()?;
+        AllowOrigin::list(list)
+    };
+    Ok(CorsLayer::new().allow_origin(allow)
+        .allow_methods([Method::GET, Method::POST, Method::PATCH])
+        .allow_headers([header::CONTENT_TYPE]))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let addr = std::env::var("FLOOD_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let cfg = config();
     std::fs::create_dir_all(&cfg.out)?;
-    let help = help::Help::open(&cfg.out.join("help.sqlite"), cfg.data.clone())?;
     let code = std::fs::canonicalize(cfg.scorer.parent().context("FLOOD_SCORER has no folder")?)?;
     let outputs = code.join("outputs");
+    let help = help::Help::open(&cfg.out.join("help.sqlite"), cfg.data.clone(), outputs.join("region/study_region.gpkg"))?;
     let models = models::Models { python: cfg.python, code, data: cfg.data };
     let app = Router::new().route("/health", get(|| async { "ok" }))
         .route("/region", post(move |extract::JsonBody(req): extract::JsonBody<RegionRequest>| {
             let outputs = outputs.clone();
             blocking(move || run(req).map(|v| models::public(v, &outputs)))
         }))
-        .merge(help::router(help)).merge(models::router(models));
+        .merge(help::router(help)).merge(models::router(models))
+        .layer(cors()?);
     println!("flood_api listening on http://{addr}");
     axum::serve(tokio::net::TcpListener::bind(&addr).await?, app).await?;
     Ok(())

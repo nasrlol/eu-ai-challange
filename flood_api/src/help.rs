@@ -18,7 +18,6 @@ use std::{collections::HashMap, path::PathBuf, sync::{Arc, Mutex, RwLock}, time:
 const OFFERS: usize = 3;
 const RETENTION_H: i64 = 72;
 /// Same limit as /region
-const MAX_ZONE_KM2: f64 = 3000.0;
 const NEEDS: [&str; 4] = ["mobility", "visual", "hearing", "other"];
 
 const SCHEMA: &str = "
@@ -50,6 +49,8 @@ pub struct Help {
     db: Arc<Mutex<Connection>>,
     graphs: Arc<RwLock<HashMap<String, Arc<Graph>>>>,
     data: PathBuf,
+    /// study_region.gpkg, for region_check
+    hull: PathBuf,
 }
 
 fn now() -> i64 {
@@ -64,12 +65,12 @@ fn purge(db: &Connection) -> Result<()> {
 }
 
 impl Help {
-    pub fn open(db_path: &std::path::Path, data: PathBuf) -> Result<Help> {
+    pub fn open(db_path: &std::path::Path, data: PathBuf, hull: PathBuf) -> Result<Help> {
         let db = Connection::open(db_path).with_context(|| format!("open {}", db_path.display()))?;
         db.execute_batch("PRAGMA foreign_keys = ON;")?;
         db.execute_batch(SCHEMA)?;
         purge(&db)?;
-        Ok(Help { db: Arc::new(Mutex::new(db)), graphs: Default::default(), data })
+        Ok(Help { db: Arc::new(Mutex::new(db)), graphs: Default::default(), data, hull })
     }
 
     /// Road graph of a zone, rebuilt from its stored bbox after a restart
@@ -94,11 +95,13 @@ struct ZoneReq {
 }
 
 fn create_zone(h: &Help, req: ZoneReq) -> Result<Value> {
+    crate::models::check_name(&req.name)?;
     let [w, s, e, n] = req.bbox;
-    let km2 = (e - w) * 111.32 * ((s + n) / 2.0).to_radians().cos() * (n - s) * 111.32;
-    if !(w < e && s < n) || km2 > MAX_ZONE_KM2 {
-        bail!("bbox must be [w, s, e, n] and at most {MAX_ZONE_KM2} km² (got {km2:.0})");
+    if !(w < e && s < n) {
+        bail!("bbox must be [west, south, east, north] with west < east and south < north");
     }
+    // same checks as /region (size, study hull), before the ~30 s – 2 min graph build
+    let km2 = crate::region_check::check(&[(w, s), (e, s), (e, n), (w, n), (w, s)], &h.hull)?;
     let g = Arc::new(Graph::build(req.bbox, &h.data)?);
     // upsert: INSERT OR REPLACE would delete the row and trip the helpers / requests foreign keys
     h.db.lock().unwrap().execute("INSERT INTO zones VALUES (?1, ?2, ?3, ?4, ?5)
