@@ -1,0 +1,13 @@
+# data (too large, from challenge bucket)
+working_data/
+processed/
+datasets_challenge.zip
+code/cache/
+code/outputs/
+flood_api/out/
+*.log
+# environments / build
+.venv/
+__pycache__/
+flood_api/target/
+.env
