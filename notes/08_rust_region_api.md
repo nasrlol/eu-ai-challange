@@ -103,3 +103,7 @@ Region = `{"type":"bbox","bbox":[w,s,e,n]}` | `{"type":"aoi","aoi":"EMSR517_AOI1
 - `/region` validation (`src/region_check.rs`) runs BEFORE OSM/raster work, 422 in < 5 ms: inverted / zero-area bbox, < 0.01 km², > 3000 km², > 1 % outside the study hull (same `study_region.gpkg` + rule as flood_tool). Polygon may be a geometry or a Feature; other types → 422.
 - `/region` facility counts: `facilities` = inside the region only; `facilities_nearby_outside` = in the 0.02° pad (still used for distances). geojson features carry `inside`.
 - `/region` outputs moved from `FLOOD_OUT/<name>` to `code/outputs/api_region/<name>`, returned as `/files/…` URLs (FLOOD_OUT keeps cache + help.sqlite).
+- Errors (all JSON `{"error"}`): 400 unparseable JSON · 404 unknown AOI / zone / helper / request · 409 state conflict (helper busy, request already assigned/done) · 422 everything else. axum rejections (body, query, path) wrapped by `extract::{JsonBody, QueryArgs, PathArg}` in main.rs.
+- Python failures → 422 with only the last stderr line (no traceback).
+- AOI regions (`/flood`, `/timeline`, `/evacuation`) and `/impact`: AOI checked in Rust first, needs `_DEL`/`_GRA` (else 422), unknown → 404.
+- `/evacuation`: `T=` must be finite; duplicate hours / weathers dropped; `observed` (flood or roads_flood) needs an AOI region; `/flood` same guard.
