@@ -6,8 +6,9 @@
 use crate::roads::{Graph, Mode};
 use crate::types::Scenario;
 use anyhow::{bail, Context, Result};
-use crate::blocking;
-use axum::{extract::{Path, Query, State}, routing::{get, patch, post}, Json, Router};
+use crate::extract::{JsonBody, PathArg, QueryArgs};
+use crate::{blocking, Conflict, NotFound};
+use axum::{extract::State, routing::{get, patch, post}, Router};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -78,7 +79,7 @@ impl Help {
         }
         let bbox: [f64; 4] = self.db.lock().unwrap()
             .query_row("SELECT w, s, e, n FROM zones WHERE name = ?1", [zone], |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?]))
-            .optional()?.with_context(|| format!("unknown zone {zone}, create it with POST /help/zones"))?;
+            .optional()?.ok_or_else(|| NotFound(format!("unknown zone {zone}, create it with POST /help/zones")))?;
         let g = Arc::new(Graph::build(bbox, &self.data)?);
         self.graphs.write().unwrap().insert(zone.into(), g.clone());
         Ok(g)
@@ -99,7 +100,9 @@ fn create_zone(h: &Help, req: ZoneReq) -> Result<Value> {
         bail!("bbox must be [w, s, e, n] and at most {MAX_ZONE_KM2} km² (got {km2:.0})");
     }
     let g = Arc::new(Graph::build(req.bbox, &h.data)?);
-    h.db.lock().unwrap().execute("INSERT OR REPLACE INTO zones VALUES (?1, ?2, ?3, ?4, ?5)", params![req.name, w, s, e, n])?;
+    // upsert: INSERT OR REPLACE would delete the row and trip the helpers / requests foreign keys
+    h.db.lock().unwrap().execute("INSERT INTO zones VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(name) DO UPDATE SET w = excluded.w, s = excluded.s, e = excluded.e, n = excluded.n", params![req.name, w, s, e, n])?;
     let summary = g.summary();
     h.graphs.write().unwrap().insert(req.name.clone(), g);
     Ok(json!({"zone": req.name, "area_km2": km2.round(), "roads": summary}))
@@ -113,10 +116,23 @@ struct HelperReq {
     mode: Mode,
 }
 
+/// A point must lie in the zone bbox and within MAX_SNAP_M of a road usable by `mode`
+fn check_point(g: &Graph, lon: f64, lat: f64, mode: Mode, who: &str) -> Result<()> {
+    if !g.contains(lon, lat) {
+        let [w, s, e, n] = g.bbox;
+        bail!("{who} at {lon}, {lat} is outside the zone [{w}, {s}, {e}, {n}]");
+    }
+    if !g.near_road(lon, lat, mode) {
+        bail!("no road usable by {} within {} m of the {who}", mode.as_str(), crate::roads::MAX_SNAP_M);
+    }
+    Ok(())
+}
+
 fn create_helper(h: &Help, req: HelperReq) -> Result<Value> {
+    check_point(&*h.graph(&req.zone)?, req.lon, req.lat, req.mode, "helper")?;
     let db = h.db.lock().unwrap();
     db.execute("INSERT INTO helpers (zone, lon, lat, mode, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-               params![req.zone, req.lon, req.lat, req.mode.as_str(), now()]).context("unknown zone?")?;
+               params![req.zone, req.lon, req.lat, req.mode.as_str(), now()])?;
     Ok(json!({"id": db.last_insert_rowid()}))
 }
 
@@ -128,11 +144,17 @@ struct HelperUpdate {
 }
 
 fn update_helper(h: &Help, id: i64, req: HelperUpdate) -> Result<Value> {
+    let (zone, lon, lat, mode): (String, f64, f64, String) = h.db.lock().unwrap()
+        .query_row("SELECT zone, lon, lat, mode FROM helpers WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .optional()?.ok_or_else(|| NotFound(format!("no helper {id}")))?;
+    if req.lon.is_some() || req.lat.is_some() {
+        check_point(&*h.graph(&zone)?, req.lon.unwrap_or(lon), req.lat.unwrap_or(lat), Mode::parse(&mode).unwrap(), "helper")?;
+    }
     let n = h.db.lock().unwrap().execute(
         "UPDATE helpers SET lon = COALESCE(?2, lon), lat = COALESCE(?3, lat), available = COALESCE(?4, available),
          updated_at = ?5 WHERE id = ?1", params![id, req.lon, req.lat, req.available, now()])?;
     if n == 0 {
-        bail!("no helper {id}");
+        return Err(NotFound(format!("no helper {id}")).into());
     }
     Ok(json!({"id": id}))
 }
@@ -163,6 +185,7 @@ fn create_request(h: &Help, req: HelpReq) -> Result<Value> {
         bail!("need must be one of {NEEDS:?}");
     }
     let g = h.graph(&req.zone)?;
+    check_point(&g, req.lon, req.lat, Mode::Walk, "person")?;
     let depth = g.depth_at(req.lon, req.lat, req.scenario);
     let risk = json!({"scenario": req.scenario, "efas_depth_m": depth, "in_risk_zone": depth > 0.0});
     let status = if req.water_now { "escalated" } else { "open" };
@@ -196,7 +219,7 @@ fn create_request(h: &Help, req: HelpReq) -> Result<Value> {
             }
         }
     }
-    found.sort_by(|a, b| a.2.eta_s.total_cmp(&b.2.eta_s));
+    found.sort_by(|a, b| a.2.cost_s.total_cmp(&b.2.cost_s)); // real time + flood penalty
     found.truncate(OFFERS);
 
     let db = h.db.lock().unwrap();
@@ -207,7 +230,8 @@ fn create_request(h: &Help, req: HelpReq) -> Result<Value> {
     let status = if found.is_empty() { "unmatched" } else { "open" };
     db.execute("UPDATE help_requests SET status = ?2 WHERE id = ?1", params![id, status])?;
     let offers: Vec<Value> = found.iter().map(|(hid, mode, r)| json!({"helper_id": hid, "mode": mode,
-        "eta_s": r.eta_s.round(), "distance_m": r.distance_m.round(), "flooded_m": r.flooded_m.round()})).collect();
+        "eta_s": r.eta_s.round(), "cost_s": r.cost_s.round(), "distance_m": r.distance_m.round(),
+        "flooded_m": r.flooded_m.round()})).collect();
     let mut out = json!({"id": id, "status": status, "risk": risk, "offers": offers});
     if found.is_empty() {
         out["message"] = json!("No helper can reach you. Call 112.");
@@ -224,15 +248,18 @@ fn accept(h: &Help, id: i64, req: AcceptReq) -> Result<Value> {
     let (zone, lon, lat, scenario, status): (String, f64, f64, String, String) = h.db.lock().unwrap()
         .query_row("SELECT zone, lon, lat, scenario, status FROM help_requests WHERE id = ?1", [id],
                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
-        .optional()?.with_context(|| format!("no request {id}"))?;
+        .optional()?.ok_or_else(|| NotFound(format!("no request {id}")))?;
     if status != "open" {
-        bail!("request {id} is {status}");
+        return Err(Conflict(format!("request {id} is {status}")).into());
     }
-    let (hlon, hlat, mode): (f64, f64, String) = h.db.lock().unwrap()
-        .query_row("SELECT h.lon, h.lat, h.mode FROM assignments a JOIN helpers h ON h.id = a.helper_id
+    let (hlon, hlat, mode, available): (f64, f64, String, bool) = h.db.lock().unwrap()
+        .query_row("SELECT h.lon, h.lat, h.mode, h.available FROM assignments a JOIN helpers h ON h.id = a.helper_id
                     WHERE a.request_id = ?1 AND a.helper_id = ?2", [id, req.helper_id],
-                   |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                   |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
         .optional()?.with_context(|| format!("helper {} was not offered request {id}", req.helper_id))?;
+    if !available {
+        return Err(Conflict(format!("helper {} is busy with another request", req.helper_id)).into());
+    }
     let sc: Scenario = serde_json::from_value(json!(scenario))?;
     let g = h.graph(&zone)?;
     let r = g.routes(&[(hlon, hlat)], (lon, lat), Mode::parse(&mode).unwrap(), sc).pop().flatten()
@@ -243,11 +270,13 @@ fn accept(h: &Help, id: i64, req: AcceptReq) -> Result<Value> {
     let tx = db.transaction()?;
     // the status check guards against two helpers accepting at the same time
     if tx.execute("UPDATE help_requests SET status = 'assigned' WHERE id = ?1 AND status = 'open'", [id])? == 0 {
-        bail!("request {id} was just taken by another helper");
+        return Err(Conflict(format!("request {id} was just taken by another helper")).into());
+    }
+    if tx.execute("UPDATE helpers SET available = 0 WHERE id = ?1 AND available = 1", [req.helper_id])? == 0 {
+        return Err(Conflict(format!("helper {} is busy with another request", req.helper_id)).into());
     }
     tx.execute("UPDATE assignments SET accepted_at = ?3, route = ?4, eta_s = ?5 WHERE request_id = ?1 AND helper_id = ?2",
                params![id, req.helper_id, now(), route.to_string(), r.eta_s])?;
-    tx.execute("UPDATE helpers SET available = 0 WHERE id = ?1", [req.helper_id])?;
     tx.commit()?;
     Ok(json!({"id": id, "status": "assigned", "helper_id": req.helper_id, "route": route}))
 }
@@ -257,7 +286,7 @@ fn get_request(h: &Help, id: i64) -> Result<Value> {
     let mut out = db.query_row("SELECT status, need, urgent, scenario, depth_m, created_at FROM help_requests WHERE id = ?1", [id],
         |r| Ok(json!({"id": id, "status": r.get::<_, String>(0)?, "need": r.get::<_, String>(1)?, "urgent": r.get::<_, bool>(2)?,
                       "risk": {"scenario": r.get::<_, String>(3)?, "efas_depth_m": r.get::<_, f64>(4)?}, "created_at": r.get::<_, i64>(5)?})))
-        .optional()?.with_context(|| format!("no request {id}"))?;
+        .optional()?.ok_or_else(|| NotFound(format!("no request {id}")))?;
     let mut st = db.prepare("SELECT helper_id, rank, eta_s, distance_m, accepted_at, route FROM assignments WHERE request_id = ?1 ORDER BY rank")?;
     let offers: Vec<Value> = st.query_map([id], |r| {
         let route: Option<String> = r.get(5)?;
@@ -271,8 +300,8 @@ fn get_request(h: &Help, id: i64) -> Result<Value> {
 
 #[derive(Deserialize)]
 struct ShelterQuery {
-    #[serde(default = "rp100")]
-    scenario: Scenario,
+    /// Default: the request's own scenario (rp100 for a zone listing)
+    scenario: Option<Scenario>,
     /// Travel mode to the shelter (default: the accepted helper's, else walking)
     mode: Option<Mode>,
     /// Also consider schools and sports halls (default true)
@@ -287,57 +316,65 @@ fn shelter_json(g: &Graph, i: usize, sc: Scenario) -> Value {
 
 fn zone_shelters(h: &Help, zone: &str, q: ShelterQuery) -> Result<Value> {
     let g = h.graph(zone)?;
-    let list: Vec<Value> = (0..g.shelters.len()).map(|i| shelter_json(&g, i, q.scenario)).collect();
+    let sc = q.scenario.unwrap_or(Scenario::Rp100);
+    let list: Vec<Value> = (0..g.shelters.len()).map(|i| shelter_json(&g, i, sc)).collect();
     let dry = list.iter().filter(|s| s["dry"] == true).count();
-    Ok(json!({"zone": zone, "scenario": q.scenario, "shelters": list.len(), "dry": dry, "list": list,
+    Ok(json!({"zone": zone, "scenario": sc, "shelters": list.len(), "dry": dry, "list": list,
               "caveat": "From OpenStreetMap; candidate_shelter = schools and sports halls, not confirmed as designated shelters; capacity unknown."}))
 }
 
 /// Nearest shelter that stays dry in the scenario, by flood-aware route from the person
 fn nearest_shelter(h: &Help, id: i64, q: ShelterQuery) -> Result<Value> {
-    let (zone, lon, lat, helper_mode): (String, f64, f64, Option<String>) = h.db.lock().unwrap()
+    let (zone, lon, lat, helper_mode, req_sc): (String, f64, f64, Option<String>, String) = h.db.lock().unwrap()
         .query_row("SELECT r.zone, r.lon, r.lat, (SELECT h.mode FROM assignments a JOIN helpers h ON h.id = a.helper_id
-                    WHERE a.request_id = r.id AND a.accepted_at IS NOT NULL) FROM help_requests r WHERE r.id = ?1", [id],
-                   |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
-        .optional()?.with_context(|| format!("no request {id}"))?;
+                    WHERE a.request_id = r.id AND a.accepted_at IS NOT NULL), r.scenario FROM help_requests r WHERE r.id = ?1", [id],
+                   |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        .optional()?.ok_or_else(|| NotFound(format!("no request {id}")))?;
+    let sc = match q.scenario { Some(s) => s, None => serde_json::from_value(json!(req_sc))? };
     let mode = q.mode.or(helper_mode.as_deref().and_then(Mode::parse)).unwrap_or(Mode::Walk);
     let g = h.graph(&zone)?;
     let ok: Vec<usize> = (0..g.shelters.len())
         .filter(|&i| q.candidates.unwrap_or(true) || g.shelters[i].kind == "shelter")
-        .filter(|&i| g.depth_at(g.shelters[i].lon, g.shelters[i].lat, q.scenario) == 0.0)
+        .filter(|&i| g.depth_at(g.shelters[i].lon, g.shelters[i].lat, sc) == 0.0)
         .collect();
     let pts: Vec<_> = ok.iter().map(|&i| (g.shelters[i].lon, g.shelters[i].lat)).collect();
-    let (k, r) = g.nearest((lon, lat), &pts, mode, q.scenario).context("no dry shelter reachable; call 112")?;
-    Ok(json!({"id": id, "mode": mode, "shelter": shelter_json(&g, ok[k], q.scenario),
-              "route": g.describe(&r, q.scenario, "Arrive at the shelter")}))
+    let (k, r) = g.nearest((lon, lat), &pts, mode, sc).context("no dry shelter reachable; call 112")?;
+    Ok(json!({"id": id, "mode": mode, "scenario": sc, "shelter": shelter_json(&g, ok[k], sc),
+              "route": g.describe(&r, sc, "Arrive at the shelter")}))
 }
 
 fn close(h: &Help, id: i64) -> Result<Value> {
     let mut db = h.db.lock().unwrap();
     let tx = db.transaction()?;
+    let status: String = tx.query_row("SELECT status FROM help_requests WHERE id = ?1", [id], |r| r.get(0))
+        .optional()?.ok_or_else(|| NotFound(format!("no request {id}")))?;
     if tx.execute("UPDATE help_requests SET status = 'done' WHERE id = ?1 AND status IN ('open', 'assigned')", [id])? == 0 {
-        bail!("no open or assigned request {id}");
+        return Err(Conflict(format!("request {id} is {status}")).into());
     }
+    // free the helper only if no other request is still assigned to it
     tx.execute("UPDATE helpers SET available = 1, updated_at = ?2
-                WHERE id IN (SELECT helper_id FROM assignments WHERE request_id = ?1 AND accepted_at IS NOT NULL)", params![id, now()])?;
+                WHERE id IN (SELECT helper_id FROM assignments WHERE request_id = ?1 AND accepted_at IS NOT NULL)
+                AND NOT EXISTS (SELECT 1 FROM assignments a JOIN help_requests r ON r.id = a.request_id
+                                WHERE a.helper_id = helpers.id AND a.accepted_at IS NOT NULL AND r.status = 'assigned')",
+               params![id, now()])?;
     tx.commit()?;
     Ok(json!({"id": id, "status": "done"}))
 }
 
 pub fn router(help: Help) -> Router {
     Router::new()
-        .route("/help/zones", post(|State(h): State<Help>, Json(r): Json<ZoneReq>| blocking(move || create_zone(&h, r))))
-        .route("/helpers", post(|State(h): State<Help>, Json(r): Json<HelperReq>| blocking(move || create_helper(&h, r))))
-        .route("/helpers/:id", patch(|State(h): State<Help>, Path(id): Path<i64>, Json(r): Json<HelperUpdate>|
+        .route("/help/zones", post(|State(h): State<Help>, JsonBody(r): JsonBody<ZoneReq>| blocking(move || create_zone(&h, r))))
+        .route("/helpers", post(|State(h): State<Help>, JsonBody(r): JsonBody<HelperReq>| blocking(move || create_helper(&h, r))))
+        .route("/helpers/:id", patch(|State(h): State<Help>, PathArg(id): PathArg<i64>, JsonBody(r): JsonBody<HelperUpdate>|
             blocking(move || update_helper(&h, id, r))))
-        .route("/help-requests", post(|State(h): State<Help>, Json(r): Json<HelpReq>| blocking(move || create_request(&h, r))))
-        .route("/help-requests/:id", get(|State(h): State<Help>, Path(id): Path<i64>| blocking(move || get_request(&h, id))))
-        .route("/help-requests/:id/accept", post(|State(h): State<Help>, Path(id): Path<i64>, Json(r): Json<AcceptReq>|
+        .route("/help-requests", post(|State(h): State<Help>, JsonBody(r): JsonBody<HelpReq>| blocking(move || create_request(&h, r))))
+        .route("/help-requests/:id", get(|State(h): State<Help>, PathArg(id): PathArg<i64>| blocking(move || get_request(&h, id))))
+        .route("/help-requests/:id/accept", post(|State(h): State<Help>, PathArg(id): PathArg<i64>, JsonBody(r): JsonBody<AcceptReq>|
             blocking(move || accept(&h, id, r))))
-        .route("/help/zones/:zone/shelters", get(|State(h): State<Help>, Path(z): Path<String>, Query(q): Query<ShelterQuery>|
+        .route("/help/zones/:zone/shelters", get(|State(h): State<Help>, PathArg(z): PathArg<String>, QueryArgs(q): QueryArgs<ShelterQuery>|
             blocking(move || zone_shelters(&h, &z, q))))
-        .route("/help-requests/:id/shelter", get(|State(h): State<Help>, Path(id): Path<i64>, Query(q): Query<ShelterQuery>|
+        .route("/help-requests/:id/shelter", get(|State(h): State<Help>, PathArg(id): PathArg<i64>, QueryArgs(q): QueryArgs<ShelterQuery>|
             blocking(move || nearest_shelter(&h, id, q))))
-        .route("/help-requests/:id/close", post(|State(h): State<Help>, Path(id): Path<i64>| blocking(move || close(&h, id))))
+        .route("/help-requests/:id/close", post(|State(h): State<Help>, PathArg(id): PathArg<i64>| blocking(move || close(&h, id))))
         .with_state(help)
 }

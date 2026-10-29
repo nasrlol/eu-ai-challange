@@ -94,12 +94,14 @@ class Network:
         pairs, first = np.unique(pairs, axis=0, return_index=True)  # a stretch shared by two lines counts once
         p, q = coords[:-1][same][first], coords[1:][same][first]
         self.xy, self.a, self.b = nodes, pairs[:, 0], pairs[:, 1]
-        self.length, self.mid = np.hypot(*(q - p).T), (p + q) / 2
+        self.length, self.mid, self.p, self.q = np.hypot(*(q - p).T), (p + q) / 2, p, q
         self.tree = cKDTree(nodes)
 
         # Bridges: tagged bridge=* in OSM, or crossing a river / water body
         edges = shapely.linestrings(np.stack([p, q], axis=1))
-        tagged = roads["bridge"].to_numpy(bool)[src[idx[:-1][same][first]]]
+        line = src[idx[:-1][same][first]]
+        tagged = roads["bridge"].to_numpy(bool)[line]
+        self.road_class = roads["road_class"].to_numpy()[line]
         crossing = np.zeros(len(edges), bool)
         if len(water):
             crossing[shapely.STRtree(edges).query(water.geometry.values, predicate="intersects")[1]] = True
@@ -139,13 +141,36 @@ def load_model():
     return joblib.load(risk_model.OUT / "model.joblib")["model"]
 
 
-def flood_mask(area, spec, xy, dem_check=True, model=None):
-    """Which points are flooded under a flood spec:
-    observed | rp10 | rp100 | rp500 | risk>=<t> | path to a polygon file (any CRS)."""
-    if spec == "observed":
-        return shapely.contains_xy(area.flood, xy[:, 0], xy[:, 1])
+STATS = {}  # per flood label: totals that are not per cell (filled by analyse)
+
+
+def spec_depth(area, spec, xy, dem_check=True):
+    """Water depth for EFAS floods (rp10/rp100/rp500, or T=<return period>); None when unknown."""
     if spec in EFAS:
-        return area.depth(spec, xy, dem_check) >= IMPASSABLE_M
+        return area.depth(spec, xy, dem_check)
+    if spec.startswith("T="):
+        return area.depth_T(float(spec[2:]), xy, dem_check)
+    return None
+
+
+def flood_label(spec):
+    if spec.startswith("T="):
+        return f"T{float(spec[2:]):g}"
+    if spec in EFAS or spec == "observed" or spec.startswith("risk"):
+        return spec.replace(">=", "_ge_")
+    return Path(spec).stem
+
+
+def flood_mask(area, spec, xy, dem_check=True, model=None):
+    """Which points are flooded under a flood spec: observed | rp10 | rp100 | rp500 |
+    T=<return period> | risk>=<t> | path to a polygon file (any CRS)."""
+    d = spec_depth(area, spec, xy, dem_check)
+    if d is not None:
+        return d >= IMPASSABLE_M
+    if spec == "observed":
+        if area.flood.is_empty:
+            raise ValueError(f"{area.name}: no observed flood (only CEMS AOIs have one; use rp10/rp100/rp500 or T=<years>)")
+        return shapely.contains_xy(area.flood, xy[:, 0], xy[:, 1])
     if spec.startswith("risk>="):
         return (model or load_model()).predict_proba(area.features(xy)[FEATURES])[:, 1] >= float(spec[6:])
     poly = gpd.read_file(spec).to_crs(3035).union_all()
@@ -180,61 +205,79 @@ def occupants_of(bxy, region):
     return pop[row, col] / np.bincount(pixel)[pixel]
 
 
-def analyse(area, floods, dem_check=True):
-    """Factor table per 1 km cell for each flood spec, for an Area (CEMS AOI or any region)."""
+def context(area):
+    """Everything about a region that does not depend on the flood: road graph, help bases,
+    buildings, occupants, terrain risk. None if the region has no roads."""
     region = area.aoi
     roads = osm_data.layer("roads", region)
     water = osm_data.layer("water", region)
     if roads.empty:
         print(f"{area.name}: no roads, skipped")
-        return []
+        return None
     net = Network(roads, water)
     entry = np.flatnonzero(shapely.dwithin(region.boundary, shapely.points(net.xy), ENTRY_M))
     fac = osm_data.layer("facilities", region)
     fdist, fnode = net.tree.query(shapely.get_coordinates(fac.geometry.values)) if len(fac) else (np.array([]), np.array([], int))
     bases = np.unique(fnode[fdist <= FACILITY_SNAP_M])
     sources = np.union1d(entry, bases)
-    all_open = np.ones(len(net.length), bool)
-    dry = net.distances(all_open, sources)
+    dry = net.distances(np.ones(len(net.length), bool), sources)
 
     b, bxy = buildings_in(region)
     snap, node = net.tree.query(bxy)
-    assessed = (snap <= SNAP_M) & np.isfinite(dry[node])
-    single = np.maximum(1, np.round(b.height.to_numpy() / STOREY_M)) == 1
-    occupants = occupants_of(bxy, region)
     risk_tif = risk_model.OUT / f"risk_{area.name}.tif"
     model = load_model()
     # held-out map for training AOIs (honest), the final model anywhere else
     terrain = sample_raster(risk_tif, bxy) if risk_tif.exists() else model.predict_proba(area.features(bxy)[FEATURES])[:, 1]
-    cell = pd.MultiIndex.from_arrays([np.floor(bxy[:, 0] / CELL_M).astype(int), np.floor(bxy[:, 1] / CELL_M).astype(int)])
+    return dict(net=net, entry=entry, bases=bases, sources=sources, dry=dry, b=b, bxy=bxy, snap=snap, node=node,
+                assessed=(snap <= SNAP_M) & np.isfinite(dry[node]),
+                single=np.maximum(1, np.round(b.height.to_numpy() / STOREY_M)) == 1,
+                occupants=occupants_of(bxy, region), terrain=terrain, model=model,
+                cell=pd.MultiIndex.from_arrays([np.floor(bxy[:, 0] / CELL_M).astype(int), np.floor(bxy[:, 1] / CELL_M).astype(int)]))
 
+
+def state(ctx, area, spec, dem_check=True):
+    """Flood-dependent arrays for one flood spec: closed roads and, per building, flooded / cut off /
+    bridge-dependent / detour / distance to help / depth and the evacuation categories."""
+    net, node, assessed, dry = ctx["net"], ctx["node"], ctx["assessed"], ctx["dry"]
+    edge_wet = flood_mask(area, spec, net.mid, dem_check, ctx["model"])
+    b_wet = flood_mask(area, spec, ctx["bxy"], dem_check, ctx["model"])
+    d_hold = net.distances(~edge_wet | net.bridge, ctx["sources"])  # flooded bridges stay usable
+    d_fail = net.distances(~edge_wet, ctx["sources"])                 # flooded bridges are lost
+    d_help = net.distances(~edge_wet | net.bridge, ctx["bases"])      # from fire stations / hospitals only
+    reach_hold, reach_fail = np.isfinite(d_hold[node]), np.isfinite(d_fail[node])
+    cut = assessed & ~reach_hold
+    bridge_dep = assessed & reach_hold & ~reach_fail
+    with np.errstate(invalid="ignore", divide="ignore"):
+        detour = np.where(assessed & reach_hold & (dry[node] > 0), d_hold[node] / np.maximum(dry[node], 1), np.nan)
+    help_km = np.where(assessed & np.isfinite(d_help[node]), (d_help[node] + ctx["snap"]) / 1000, np.nan)
+
+    # Evacuation categories per building; depth is only known for EFAS floods
+    depth = spec_depth(area, spec, ctx["bxy"], dem_check)
+    depth = np.full(len(b_wet), np.nan) if depth is None else depth
+    with np.errstate(invalid="ignore"):
+        must = b_wet & ((depth >= MUST_DEPTH_M) | ctx["single"])
+        early = ~must & (b_wet | cut)
+        prepare = ~must & ~early & (ctx["terrain"] >= 0.5) & (bridge_dep | (detour >= 2) | (help_km >= 15))
+    return dict(edge_wet=edge_wet, b_wet=b_wet, cut=cut, bridge_dep=bridge_dep, detour=detour, help_km=help_km,
+                depth=depth, must=must, early=early, prepare=prepare)
+
+
+def analyse(area, floods, dem_check=True):
+    """Factor table per 1 km cell for each flood spec, for an Area (CEMS AOI or any region)."""
+    ctx = context(area)
+    if ctx is None:
+        return []
+    occupants, net = ctx["occupants"], ctx["net"]
     out = []
     for spec in floods:
-        edge_wet = flood_mask(area, spec, net.mid, dem_check, model)
-        b_wet = flood_mask(area, spec, bxy, dem_check, model)
-        d_hold = net.distances(~edge_wet | net.bridge, sources)  # flooded bridges stay usable
-        d_fail = net.distances(~edge_wet, sources)                 # flooded bridges are lost
-        d_help = net.distances(~edge_wet | net.bridge, bases)      # from fire stations / hospitals only
-        reach_hold, reach_fail = np.isfinite(d_hold[node]), np.isfinite(d_fail[node])
-        cut = assessed & ~reach_hold
-        bridge_dep = assessed & reach_hold & ~reach_fail
-        with np.errstate(invalid="ignore", divide="ignore"):
-            detour = np.where(assessed & reach_hold & (dry[node] > 0), d_hold[node] / np.maximum(dry[node], 1), np.nan)
-        help_km = np.where(assessed & np.isfinite(d_help[node]), (d_help[node] + snap) / 1000, np.nan)
-
-        # Evacuation categories per building; depth is only known for EFAS floods
-        depth = area.depth(spec, bxy, dem_check) if spec in EFAS else np.full(len(bxy), np.nan)
-        with np.errstate(invalid="ignore"):
-            must = b_wet & ((depth >= MUST_DEPTH_M) | single)
-            early = ~must & (b_wet | cut)
-            prepare = ~must & ~early & (terrain >= 0.5) & (bridge_dep | (detour >= 2) | (help_km >= 15))
-
-        df = pd.DataFrame(dict(wet=b_wet, cut=cut, bridge=bridge_dep, assessed=assessed, detour=detour, help_km=help_km,
-                               single_wet=np.where(b_wet, single, np.nan), terrain=terrain,
+        st = state(ctx, area, spec, dem_check)
+        b_wet, cut, must, early, prepare = st["b_wet"], st["cut"], st["must"], st["early"], st["prepare"]
+        df = pd.DataFrame(dict(wet=b_wet, cut=cut, bridge=st["bridge_dep"], assessed=ctx["assessed"], detour=st["detour"],
+                               help_km=st["help_km"], single_wet=np.where(b_wet, ctx["single"], np.nan), terrain=ctx["terrain"],
                                occupants=occupants, affected=np.where(b_wet | cut, occupants, 0),
                                must=np.where(must, occupants, 0), early=np.where(early, occupants, 0),
                                prepare=np.where(prepare, occupants, 0), air=np.where((must | early) & cut, occupants, 0)),
-                          index=cell)
+                          index=ctx["cell"])
         g = df.groupby(level=[0, 1])
         cells = pd.DataFrame(dict(
             buildings=g.size(),
@@ -250,12 +293,14 @@ def analyse(area, floods, dem_check=True):
             must_people=g.must.sum(), early_people=g.early.sum(), prepare_people=g.prepare.sum(), air_people=g.air.sum(),
         ))
         cells = evacuation(explain(cells.reset_index(names=["cx", "cy"])))
-        label = spec.replace(">=", "_ge_") if spec in EFAS or spec == "observed" or spec.startswith("risk") else Path(spec).stem
+        label = flood_label(spec)
         cells.insert(0, "flood", label)
+        STATS[label] = dict(buildings=len(b_wet), buildings_flooded=int(b_wet.sum()), buildings_cut_off=int(cut.sum()),
+                            roads_closed_km=float(net.length[st["edge_wet"]].sum() / 1000), road_km=float(net.length.sum() / 1000))
         cells.insert(0, "area", area.name)
         out.append(cells)
-        print(f"{area.name} [{cells.flood.iloc[0]}]: {len(b):,} buildings, {b_wet.sum():,} flooded, {cut.sum():,} cut off, "
-              f"{bridge_dep.sum():,} bridge-dependent, {len(bases)} help bases, {(cells.overall != 'Low').sum()} cells above Low",
+        print(f"{area.name} [{cells.flood.iloc[0]}]: {len(b_wet):,} buildings, {b_wet.sum():,} flooded, {cut.sum():,} cut off, "
+              f"{st['bridge_dep'].sum():,} bridge-dependent, {len(ctx['bases'])} help bases, {(cells.overall != 'Low').sum()} cells above Low",
               flush=True)
     return out
 

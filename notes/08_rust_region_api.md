@@ -2,6 +2,8 @@
 
 Goal: input = region with a flood alert (bbox / polygon, lon/lat) → fetch data → features that match our models.
 
+Hosted copy: see [12_hosting.md](12_hosting.md) (valencia, systemd `flood-api`, update steps).
+
 ## Model contract (from `code/`)
 | Model | Features | Grid |
 |---|---|---|
@@ -90,5 +92,14 @@ Region = `{"type":"bbox","bbox":[w,s,e,n]}` | `{"type":"aoi","aoi":"EMSR517_AOI1
 | `POST /timeline {name, region, driver}` | timeline | `driver.type` = `whatif {peak_rp, rise_h, fall_h, step_h}` / `open_meteo {point?, start, end}` / `series {steps:[{time, return_period}]}` → `steps.csv` as JSON |
 | `POST /impact {aoi, cost_eur_m2, max_depth_m}` · `GET /impact` | pipeline (damage €, displaced) | runs `pipeline.py --json` (new flag) · `report/flood_summary.csv` |
 | `GET /roads/{aoi}` · `GET /interp/{aoi}` | road_model, interp_model | stored outputs, filtered by AOI prefix |
+| `POST /evacuation {name, region, flood, roads_flood, hours, weekend, weather}` | evac_sim (human evacuation flow) | `python3 code/evac_sim.py --region <w,s,e,n or AOI> --flood <rp100/T=500/…> [--roads-flood none\|T=10\|…] [--hours 3 8 17] [--weekend] [--weather dry rain heavy_rain fog snow] --name <name>` → `code/outputs/evacuations/<name>/summary.json` (+ `roads_<HHh_weather>.gpkg`, `cells_<…>.gpkg`, `viewer.html`). Exit code ≠ 0 + message on bad region/weather. ~5 s small bbox, ~1 min dense 450 km². API validates flood (`rp*`/`T=`/`observed`), roads_flood (+`none`), hours 0–23, weather ∈ dry/rain/heavy_rain/fog/snow; returns summary.json; listed in `/models`. |
 - Python results land in `code/outputs/` (not `FLOOD_OUT`). Flood specs are whitelisted (no file paths).
 - Tested: small bbox in AOI15 /flood + /timeline ~2 s; `/impact` EMSR518_AOI02 = report CSV (38 bldgs, €3.25 M). Big regions take minutes (synchronous).
+- AOI paths (`/roads/{aoi}`, `/interp/{aoi}`): must match `EMSR\d{3}_AOI\d{2}(_DEL|_GRA)?` → else 422; valid but no results → 404. Match = exact or `aoi_…` (no loose prefixes).
+- `GET /files/{path}`: read-only, serves files under `code/outputs/` only (canonicalised; `..`/symlinks outside → 404); folder → JSON listing. Content-type by extension (html, json, csv, tif, gpkg, pdf, png).
+- All model responses (`/models`, `/flood`, `/timeline`, `/impact`, `/evacuation`, `/roads`, `/interp`) rewrite absolute paths under `code/outputs/` to `/files/…` URLs. `/region` (writes to `FLOOD_OUT`) not yet.
+- `/flood` files: + `danger.{flood}` and `evacuation.{flood}` CSV URLs, `summary`.
+- `NotFound` error type (main.rs) → 404; other errors stay 422.
+- `/region` validation (`src/region_check.rs`) runs BEFORE OSM/raster work, 422 in < 5 ms: inverted / zero-area bbox, < 0.01 km², > 3000 km², > 1 % outside the study hull (same `study_region.gpkg` + rule as flood_tool). Polygon may be a geometry or a Feature; other types → 422.
+- `/region` facility counts: `facilities` = inside the region only; `facilities_nearby_outside` = in the 0.02° pad (still used for distances). geojson features carry `inside`.
+- `/region` outputs moved from `FLOOD_OUT/<name>` to `code/outputs/api_region/<name>`, returned as `/files/…` URLs (FLOOD_OUT keeps cache + help.sqlite).

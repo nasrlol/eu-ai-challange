@@ -2,8 +2,9 @@
 //! on request as subprocesses, like the scorer in /region; models trained on the CEMS AOIs
 //! (road_model, interp_model, evaluate, report) serve their stored outputs.
 use anyhow::{bail, Context, Result};
-use crate::blocking;
-use axum::{extract::{Path, State}, routing::{get, post}, Json, Router};
+use crate::extract::{JsonBody, PathArg};
+use crate::{blocking, NotFound};
+use axum::{body::Body, extract::State, http::{header, StatusCode}, response::{IntoResponse, Response}, routing::{get, post}, Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::{path::PathBuf, process::Command};
@@ -41,11 +42,15 @@ impl Models {
         self.code.join("outputs")
     }
 
+    fn public(&self, v: Value) -> Value {
+        public(v, &self.out())
+    }
+
     fn region_arg(&self, r: &Region, name: &str) -> Result<String> {
         Ok(match r {
             Region::Bbox { bbox: [w, s, e, n] } => format!("{w},{s},{e},{n}"),
             Region::Aoi { aoi } => {
-                check_name(aoi)?;
+                self.cems_folder(aoi)?; // 422 if malformed, 404 if unknown, before Python
                 aoi.clone()
             }
             Region::Polygon { geometry } => {
@@ -60,21 +65,25 @@ impl Models {
         })
     }
 
-    /// Run a script in code/; on failure return its last error lines (the scripts exit with a message)
+    /// Run a script in code/; on failure return only its last stderr line (the scripts exit with a
+    /// one-line message; for an uncaught exception that is the exception line, not the traceback)
     fn python(&self, script: &str, args: &[String]) -> Result<String> {
         let out = Command::new(&self.python).arg(self.code.join(script)).args(args).current_dir(&self.code)
             .output().with_context(|| format!("run {script}"))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
-            let tail: Vec<&str> = err.lines().rev().take(5).collect();
-            bail!("{script} failed: {}", tail.into_iter().rev().collect::<Vec<_>>().join("\n"));
+            let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no error message");
+            bail!("{script}: {}", last.trim());
         }
         Ok(String::from_utf8_lossy(&out.stdout).into())
     }
 
-    /// CEMS PRODUCT vector folder of an AOI, e.g. EMSR517_AOI15_GRA
+    /// CEMS PRODUCT vector folder of an AOI with its product type, e.g. EMSR517_AOI15_GRA
     fn cems_folder(&self, aoi: &str) -> Result<PathBuf> {
-        check_name(aoi)?;
+        check_aoi(aoi)?;
+        if aoi.split('_').count() != 3 {
+            bail!("AOI {aoi:?} needs its product type here, e.g. {aoi}_DEL or {aoi}_GRA");
+        }
         for d in std::fs::read_dir(&self.data)?.flatten().filter(|d| d.file_name().to_string_lossy().starts_with("ems_")) {
             for f in std::fs::read_dir(d.path())?.flatten() {
                 let n = f.file_name().to_string_lossy().into_owned();
@@ -83,8 +92,22 @@ impl Models {
                 }
             }
         }
-        bail!("no CEMS PRODUCT folder for {aoi}")
+        Err(NotFound(format!("unknown AOI {aoi}: no CEMS PRODUCT folder")).into())
     }
+}
+
+/// Replace every absolute path under `outputs` (code/outputs) in a response with its /files/ URL
+pub fn public(mut v: Value, outputs: &std::path::Path) -> Value {
+    fn walk(v: &mut Value, root: &str) {
+        match v {
+            Value::String(s) if s.starts_with(root) => *s = format!("/files/{}", s[root.len()..].trim_start_matches('/')),
+            Value::Array(a) => a.iter_mut().for_each(|x| walk(x, root)),
+            Value::Object(o) => o.values_mut().for_each(|x| walk(x, root)),
+            _ => {}
+        }
+    }
+    walk(&mut v, &outputs.to_string_lossy());
+    v
 }
 
 /// CSV as a list of objects; numbers parsed, empty cells null
@@ -106,9 +129,24 @@ fn csv_rows(path: &std::path::Path, keep: impl Fn(&csv::StringRecord, &csv::Stri
     Ok(rows)
 }
 
-/// Rows whose `col` starts with the AOI name (e.g. EMSR517_AOI15)
+/// AOI code: EMSR<3 digits>_AOI<2 digits>, optionally _DEL or _GRA
+fn check_aoi(aoi: &str) -> Result<()> {
+    let p: Vec<&str> = aoi.split('_').collect();
+    let digits = |s: Option<&str>, n: usize| s.is_some_and(|s| s.len() == n && s.bytes().all(|b| b.is_ascii_digit()));
+    let ok = (p.len() == 2 || p.len() == 3)
+        && digits(p[0].strip_prefix("EMSR"), 3)
+        && digits(p[1].strip_prefix("AOI"), 2)
+        && p.get(2).map_or(true, |t| matches!(*t, "DEL" | "GRA"));
+    if !ok {
+        bail!("AOI {aoi:?} is not a code like EMSR517_AOI15 or EMSR517_AOI15_GRA");
+    }
+    Ok(())
+}
+
+/// Rows whose `col` is the AOI, or the AOI followed by `_` (product type, observation pair)
 fn by_aoi<'a>(col: &'a str, aoi: &'a str) -> impl Fn(&csv::StringRecord, &csv::StringRecord) -> bool + 'a {
-    move |h, r| h.iter().position(|c| c == col).and_then(|i| r.get(i)).is_some_and(|v| v.starts_with(aoi))
+    move |h, r| h.iter().position(|c| c == col).and_then(|i| r.get(i))
+        .is_some_and(|v| v == aoi || v.strip_prefix(aoi).is_some_and(|rest| rest.starts_with('_')))
 }
 
 #[derive(Deserialize)]
@@ -125,6 +163,9 @@ fn rp100() -> Vec<String> { vec!["rp100".into()] }
 
 fn flood(m: &Models, req: FloodReq) -> Result<Value> {
     check_name(&req.name)?;
+    if !matches!(req.region, Region::Aoi { .. }) && req.floods.iter().any(|f| f == "observed") {
+        bail!("flood 'observed' needs a CEMS AOI region (type aoi)");
+    }
     for f in &req.floods {
         let ok = matches!(f.as_str(), "rp10" | "rp100" | "rp500" | "observed")
             || f.strip_prefix("risk>=").is_some_and(|t| t.parse::<f64>().is_ok_and(|t| (0.0..=1.0).contains(&t)));
@@ -140,8 +181,91 @@ fn flood(m: &Models, req: FloodReq) -> Result<Value> {
     m.python("flood_tool.py", &args)?;
     let dir = m.out().join("regions").join(&req.name);
     let mut summary: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("summary.json"))?)?;
-    summary["files"] = json!({"dir": dir, "risk": dir.join("risk.tif"), "access_danger": dir.join("access_danger.gpkg")});
+    // per-flood tables: danger_<flood>.csv (factors) and evacuation_<flood>.csv (ranked cells)
+    let (mut danger, mut evac) = (Map::new(), Map::new());
+    for f in std::fs::read_dir(&dir)?.flatten() {
+        let n = f.file_name().to_string_lossy().into_owned();
+        if let Some(stem) = n.strip_suffix(".csv") {
+            if let Some(k) = stem.strip_prefix("danger_") {
+                danger.insert(k.into(), json!(f.path()));
+            } else if let Some(k) = stem.strip_prefix("evacuation_") {
+                evac.insert(k.into(), json!(f.path()));
+            }
+        }
+    }
+    summary["files"] = json!({"dir": dir, "risk": dir.join("risk.tif"), "access_danger": dir.join("access_danger.gpkg"),
+                              "danger": danger, "evacuation": evac, "summary": dir.join("summary.json")});
     Ok(summary)
+}
+
+/// rp10 | rp100 | rp500 | T=<years>, plus `observed` (AOI regions only) and `none` where allowed
+fn flood_stage(f: &str, observed: bool, none: bool) -> Result<()> {
+    let ok = matches!(f, "rp10" | "rp100" | "rp500")
+        || (observed && f == "observed")
+        || (none && f == "none")
+        || f.strip_prefix("T=").is_some_and(|t| t.parse::<f64>().is_ok_and(|t| t.is_finite() && t >= 1.0));
+    if !ok {
+        bail!("flood stage {f:?}: use rp10, rp100, rp500, T=<years>{}{}", if observed { ", observed" } else { "" }, if none { ", none" } else { "" });
+    }
+    Ok(())
+}
+
+const WEATHER: [&str; 5] = ["dry", "rain", "heavy_rain", "fog", "snow"]; // keys of WEATHER in evac_sim.py
+
+#[derive(Deserialize)]
+struct EvacReq {
+    name: String,
+    region: Region,
+    #[serde(default = "rp100_one")]
+    flood: String,
+    /// Flood stage closing roads while people leave (default: same as `flood`; `none` = all roads open)
+    roads_flood: Option<String>,
+    #[serde(default = "hours")]
+    hours: Vec<u32>,
+    #[serde(default)]
+    weekend: bool,
+    #[serde(default = "dry")]
+    weather: Vec<String>,
+}
+fn rp100_one() -> String { "rp100".into() }
+fn hours() -> Vec<u32> { vec![3, 8, 13, 17] }
+fn dry() -> Vec<String> { vec!["dry".into()] }
+
+fn evacuation(m: &Models, mut req: EvacReq) -> Result<Value> {
+    check_name(&req.name)?;
+    flood_stage(&req.flood, true, false)?;
+    if let Some(r) = &req.roads_flood {
+        flood_stage(r, true, true)?;
+    }
+    let is_aoi = matches!(req.region, Region::Aoi { .. });
+    if !is_aoi && (req.flood == "observed" || req.roads_flood.as_deref() == Some("observed")) {
+        bail!("flood 'observed' needs a CEMS AOI region (type aoi)");
+    }
+    // duplicate hours / weathers would run twice and collide on output names
+    let mut seen = std::collections::HashSet::new();
+    req.hours.retain(|h| seen.insert(*h));
+    let mut seen = std::collections::HashSet::new();
+    req.weather.retain(|w| seen.insert(w.clone()));
+    if req.hours.is_empty() || req.hours.iter().any(|&h| h > 23) {
+        bail!("hours must be 0..23");
+    }
+    if req.weather.is_empty() || req.weather.iter().any(|w| !WEATHER.contains(&w.as_str())) {
+        bail!("weather must be from {WEATHER:?}");
+    }
+    let mut args = vec!["--region".into(), m.region_arg(&req.region, &req.name)?, "--name".into(), req.name.clone(),
+                        "--flood".into(), req.flood.clone(), "--hours".into()];
+    args.extend(req.hours.iter().map(|h| h.to_string()));
+    args.push("--weather".into());
+    args.extend(req.weather.iter().cloned());
+    if let Some(r) = &req.roads_flood {
+        args.extend(["--roads-flood".into(), r.clone()]);
+    }
+    if req.weekend {
+        args.push("--weekend".into());
+    }
+    m.python("evac_sim.py", &args)?;
+    let path = m.out().join("evacuations").join(&req.name).join("summary.json");
+    Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
 }
 
 #[derive(Deserialize)]
@@ -248,6 +372,8 @@ fn models_list(m: &Models) -> Result<Value> {
              "endpoints": ["POST /flood"], "runs_on": "any region in the study area"},
             {"name": "timeline", "script": "timeline.py", "what": "flood development in time: depth, closed roads, people to evacuate per step",
              "endpoints": ["POST /timeline"], "runs_on": "any region in the study area"},
+            {"name": "evacuation", "script": "evac_sim.py", "what": "human evacuation flow: evacuees, cars, congested roads, time to safety per hour/weather",
+             "endpoints": ["POST /evacuation"], "runs_on": "any region in the study area"},
             {"name": "impact", "script": "pipeline.py", "what": "building damage (€) and displaced people from an observed flood",
              "endpoints": ["POST /impact", "GET /impact"], "runs_on": "CEMS AOIs with GHS-OBAT buildings"},
             {"name": "roads", "script": "road_model.py", "what": "road km impassable per scenario, road damage model, closure timeline",
@@ -262,11 +388,11 @@ fn models_list(m: &Models) -> Result<Value> {
 }
 
 fn roads(m: &Models, aoi: &str) -> Result<Value> {
-    check_name(aoi)?;
+    check_aoi(aoi)?;
     let dir = m.out().join("roads");
     let exposure = csv_rows(&dir.join("exposure_by_area.csv"), by_aoi("area", aoi))?;
     if exposure.is_empty() {
-        bail!("no road results for {aoi}; AOI names look like EMSR517_AOI15");
+        return Err(NotFound(format!("no road results for {aoi}")).into());
     }
     Ok(json!({
         "aoi": aoi, "exposure_km": exposure,
@@ -277,11 +403,11 @@ fn roads(m: &Models, aoi: &str) -> Result<Value> {
 }
 
 fn interp(m: &Models, aoi: &str) -> Result<Value> {
-    check_name(aoi)?;
+    check_aoi(aoi)?;
     let dir = m.out().join("interp");
     let rows = csv_rows(&dir.join("timeseries.csv"), by_aoi("pair", aoi))?;
     if rows.is_empty() {
-        bail!("no interpolated extents for {aoi} (needs PRODUCT + MONIT01 that overlap)");
+        return Err(NotFound(format!("no interpolated extents for {aoi} (needs PRODUCT + MONIT01 that overlap)")).into());
     }
     Ok(json!({"aoi": aoi, "timeseries": rows, "files": {"extents": dir.join("extents.gpkg")}}))
 }
@@ -291,14 +417,50 @@ fn impact_all(m: &Models) -> Result<Value> {
               "files": {"pdf": m.out().join("report/flood_summary.pdf")}}))
 }
 
+/// Read-only download of a result file (or a folder listing) under code/outputs
+async fn files(State(m): State<Models>, PathArg(rel): PathArg<String>) -> Response {
+    let not_found = || (StatusCode::NOT_FOUND, Json(json!({"error": "no such file under outputs"}))).into_response();
+    let Ok(root) = std::fs::canonicalize(m.out()) else { return not_found() };
+    // canonicalize resolves .. and symlinks, so anything outside the root is rejected here
+    let Ok(path) = std::fs::canonicalize(root.join(&rel)) else { return not_found() };
+    if !path.starts_with(&root) {
+        return not_found();
+    }
+    if path.is_dir() {
+        let mut names: Vec<String> = std::fs::read_dir(&path).into_iter().flatten().flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned() + if e.path().is_dir() { "/" } else { "" }).collect();
+        names.sort();
+        let base = format!("/files/{}", path.strip_prefix(&root).unwrap().to_string_lossy());
+        let entries: Vec<Value> = names.iter().map(|n| json!({"name": n, "url": format!("{}/{n}", base.trim_end_matches('/'))})).collect();
+        return Json(json!({"folder": base, "entries": entries})).into_response();
+    }
+    let ctype = match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "json" => "application/json",
+        "geojson" => "application/geo+json",
+        "csv" => "text/csv; charset=utf-8",
+        "tif" | "tiff" => "image/tiff",
+        "png" => "image/png",
+        "pdf" => "application/pdf",
+        "gpkg" => "application/geopackage+sqlite3",
+        _ => "application/octet-stream",
+    };
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, ctype)], Body::from(bytes)).into_response(),
+        Err(_) => not_found(),
+    }
+}
+
 pub fn router(models: Models) -> Router {
     Router::new()
-        .route("/models", get(|State(m): State<Models>| blocking(move || models_list(&m))))
-        .route("/flood", post(|State(m): State<Models>, Json(r): Json<FloodReq>| blocking(move || flood(&m, r))))
-        .route("/timeline", post(|State(m): State<Models>, Json(r): Json<TimelineReq>| blocking(move || timeline(&m, r))))
-        .route("/impact", get(|State(m): State<Models>| blocking(move || impact_all(&m)))
-            .post(|State(m): State<Models>, Json(r): Json<ImpactReq>| blocking(move || impact(&m, r))))
-        .route("/roads/:aoi", get(|State(m): State<Models>, Path(a): Path<String>| blocking(move || roads(&m, &a))))
-        .route("/interp/:aoi", get(|State(m): State<Models>, Path(a): Path<String>| blocking(move || interp(&m, &a))))
+        .route("/models", get(|State(m): State<Models>| blocking(move || models_list(&m).map(|v| m.public(v)))))
+        .route("/flood", post(|State(m): State<Models>, JsonBody(r): JsonBody<FloodReq>| blocking(move || flood(&m, r).map(|v| m.public(v)))))
+        .route("/evacuation", post(|State(m): State<Models>, JsonBody(r): JsonBody<EvacReq>| blocking(move || evacuation(&m, r).map(|v| m.public(v)))))
+        .route("/timeline", post(|State(m): State<Models>, JsonBody(r): JsonBody<TimelineReq>| blocking(move || timeline(&m, r).map(|v| m.public(v)))))
+        .route("/impact", get(|State(m): State<Models>| blocking(move || impact_all(&m).map(|v| m.public(v))))
+            .post(|State(m): State<Models>, JsonBody(r): JsonBody<ImpactReq>| blocking(move || impact(&m, r).map(|v| m.public(v)))))
+        .route("/roads/:aoi", get(|State(m): State<Models>, PathArg(a): PathArg<String>| blocking(move || roads(&m, &a).map(|v| m.public(v)))))
+        .route("/interp/:aoi", get(|State(m): State<Models>, PathArg(a): PathArg<String>| blocking(move || interp(&m, &a).map(|v| m.public(v)))))
+        .route("/files/*path", get(files))
         .with_state(models)
 }

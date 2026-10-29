@@ -1,7 +1,9 @@
 //! Flood-aware routing for "Help a friend": a road graph from the OSM extracts, each edge tagged
 //! with the EFAS depth at its midpoint, and Dijkstra towards the person who asked for help.
-//! Edges flooded in the chosen scenario are not removed but made very slow, so routes avoid them
-//! and only use them when there is no other way in (reported as `flooded_m`).
+//! Edges flooded in the chosen scenario are not removed but get a fixed extra cost per metre (the
+//! same for every mode, so a slow walker is not punished more than a car for the same stretch):
+//! routes avoid them and only use them when there is no other way in (reported as `flooded_m`).
+//! Helpers are ranked by that cost; `eta_s` is the real travel time.
 use crate::osm::{read_roads, Facility};
 use crate::raster::read_window;
 use crate::types::Scenario;
@@ -13,8 +15,11 @@ use std::{cmp::Reverse, collections::{BinaryHeap, HashMap}, path::Path};
 
 /// Water deeper than this on a road counts as flooded (assumption: ~30 cm can float a car)
 pub const FLOODED_M: f32 = 0.3;
-/// Travel time multiplier on flooded edges
-const FLOOD_PENALTY: f64 = 20.0;
+/// Extra cost per metre of flooded road, s/m (assumption: worth a ~5 km car detour to avoid 100 m)
+const FLOOD_PENALTY_S_PER_M: f64 = 5.0;
+/// A point further than this from a usable road is refused
+pub const MAX_SNAP_M: f64 = 500.0;
+const WALK_MS: f64 = 5.0 / 3.6;
 const M_PER_DEG: f64 = 111_320.0;
 
 #[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -83,6 +88,8 @@ pub struct Graph {
     lat0: f64,
     efas: [crate::raster::Grid; 3],
     pub shelters: Vec<Facility>,
+    /// [west, south, east, north] the graph was built for
+    pub bbox: [f64; 4],
 }
 
 fn scenario_ix(s: Scenario) -> usize {
@@ -90,7 +97,10 @@ fn scenario_ix(s: Scenario) -> usize {
 }
 
 pub struct Route {
+    /// Real travel time, s (snapping distances walked)
     pub eta_s: f64,
+    /// eta_s + flood penalty: what helpers are ranked by
+    pub cost_s: f64,
     pub distance_m: f64,
     pub flooded_m: f64,
     edges: Vec<u32>,
@@ -106,7 +116,7 @@ impl Graph {
         let efas: [_; 3] = efas.try_into().ok().unwrap();
         let lat0 = (s + n) / 2.0;
         let mut g = Graph { nodes: vec![], edges: vec![], incoming: vec![], outgoing: vec![], roads: vec![], index: RTree::new(),
-                            lat0, efas, shelters };
+                            lat0, efas, shelters, bbox };
         let mut ids: HashMap<i64, u32> = HashMap::new();
         for road in roads {
             let ri = g.roads.len() as u32;
@@ -167,12 +177,23 @@ impl Graph {
         mode.speed(&self.roads[e.road as usize].0)
     }
 
-    /// Nearest node that `mode` can use, and how far away it is
+    /// Nearest node that `mode` can use within MAX_SNAP_M, and how far away it is
     fn snap(&self, lon: f64, lat: f64, mode: Mode) -> Option<(u32, f64)> {
         let p = self.xy((lon, lat));
         self.index.nearest_neighbor_iter_with_distance_2(&p).take(500)
+            .take_while(|(_, d2)| *d2 <= MAX_SNAP_M * MAX_SNAP_M)
             .find(|(n, _)| self.incoming[n.data as usize].iter().any(|&e| self.allowed(&self.edges[e as usize], mode).is_some()))
             .map(|(n, d2)| (n.data, d2.sqrt()))
+    }
+
+    /// Is there a road `mode` can use within MAX_SNAP_M?
+    pub fn near_road(&self, lon: f64, lat: f64, mode: Mode) -> bool {
+        self.snap(lon, lat, mode).is_some()
+    }
+
+    pub fn contains(&self, lon: f64, lat: f64) -> bool {
+        let [w, s, e, n] = self.bbox;
+        lon >= w && lon <= e && lat >= s && lat <= n
     }
 
     /// Dijkstra from `root`. Backwards (towards = true): travel time from every node to root, and
@@ -195,7 +216,7 @@ impl Graph {
                 let Some(kmh) = self.allowed(e, mode) else { continue };
                 let mut dt = e.len_m as f64 / (kmh / 3.6);
                 if e.depth[si] > FLOODED_M {
-                    dt *= FLOOD_PENALTY;
+                    dt += e.len_m as f64 * FLOOD_PENALTY_S_PER_M;
                 }
                 let u = if towards { e.from } else { e.to };
                 if t + dt < time[u as usize] {
@@ -224,16 +245,18 @@ impl Graph {
                 edges.push(ei);
                 n = self.edges[ei as usize].to;
             }
-            Some(self.route(edges, time[start as usize], o_off + t_off, sc))
+            Some(self.route(edges, time[start as usize], o_off + t_off, mode, sc))
         }).collect()
     }
 
-    fn route(&self, edges: Vec<u32>, time_s: f64, off_m: f64, sc: Scenario) -> Route {
+    /// `cost_s` = search cost along the edges (incl. flood penalty)
+    fn route(&self, edges: Vec<u32>, cost_s: f64, off_m: f64, mode: Mode, sc: Scenario) -> Route {
         let si = scenario_ix(sc);
         let es = edges.iter().map(|&i| &self.edges[i as usize]);
         let distance_m = es.clone().map(|e| e.len_m as f64).sum::<f64>() + off_m;
-        let flooded_m = es.filter(|e| e.depth[si] > FLOODED_M).fold(0.0, |a, e| a + e.len_m as f64); // sum() gives -0.0
-        Route { eta_s: time_s + off_m / (5.0 / 3.6), distance_m, flooded_m, edges }
+        let flooded_m = es.clone().filter(|e| e.depth[si] > FLOODED_M).fold(0.0, |a, e| a + e.len_m as f64); // sum() gives -0.0
+        let time_s = es.fold(0.0, |a, e| a + e.len_m as f64 / (self.allowed(e, mode).unwrap_or(5.0) / 3.6));
+        Route { eta_s: time_s + off_m / WALK_MS, cost_s: cost_s + off_m / WALK_MS, distance_m, flooded_m, edges }
     }
 
     /// Fastest of the `targets` to reach from `origin`, with its index
@@ -242,8 +265,8 @@ impl Graph {
         let (time, prev) = self.search(o, mode, sc, false);
         let (i, t, t_off) = targets.iter().enumerate()
             .filter_map(|(i, &(lon, lat))| { let (t, off) = self.snap(lon, lat, mode)?; Some((i, t, off)) })
-            .filter(|&(_, t, off)| time[t as usize].is_finite() && off < 500.0)
-            .min_by(|a, b| (time[a.1 as usize] + a.2 / (5.0 / 3.6)).total_cmp(&(time[b.1 as usize] + b.2 / (5.0 / 3.6))))?;
+            .filter(|&(_, t, _)| time[t as usize].is_finite())
+            .min_by(|a, b| (time[a.1 as usize] + a.2 / WALK_MS).total_cmp(&(time[b.1 as usize] + b.2 / WALK_MS)))?;
         let (mut n, mut edges) = (t, vec![]);
         while n != o {
             let ei = prev[n as usize];
@@ -251,7 +274,7 @@ impl Graph {
             n = self.edges[ei as usize].from;
         }
         edges.reverse();
-        Some((i, self.route(edges, time[t as usize], o_off + t_off, sc)))
+        Some((i, self.route(edges, time[t as usize], o_off + t_off, mode, sc)))
     }
 
     fn bearing(&self, e: &Edge) -> f64 {
@@ -302,7 +325,7 @@ impl Graph {
         }
         steps.push(json!({"instruction": arrive, "street": null, "distance_m": 0, "flooded_m": 0}));
         json!({
-            "eta_s": r.eta_s.round(), "distance_m": r.distance_m.round(), "flooded_m": r.flooded_m.round(),
+            "eta_s": r.eta_s.round(), "cost_s": r.cost_s.round(), "distance_m": r.distance_m.round(), "flooded_m": r.flooded_m.round(),
             "geometry": {"type": "LineString", "coordinates": coords.iter().map(|&(x, y)| [x, y]).collect::<Vec<_>>()},
             "steps": steps,
         })
