@@ -10,6 +10,7 @@
 8. [08_rust_region_api.md](08_rust_region_api.md): Rust API design, model feature contract, raster layouts, river-source caveat, API data structures (`types.rs`)
 9. [09_ai_layer.md](09_ai_layer.md): LLM layer design: facts → rules → Claude phrases → validator; API gaps to fix first
 10. [10_todo.md](10_todo.md): open tasks: API fixes, AI layer, Annex checks
-11. [../code/NOTES.md](../code/NOTES.md): build log of the Python models (prompts, methods, results, bugs), final analysis and roadmap for arbitrary floods (step 12). Code layout: `code/paths.py`, results in `code/outputs/`, caches in `code/cache/`
+11. [11_help_a_friend.md](11_help_a_friend.md): "Help a friend" volunteer matching + flood-aware routing, design choices, limits
+12. [../code/NOTES.md](../code/NOTES.md): build log of the Python models (prompts, methods, results, bugs), final analysis and roadmap for arbitrary floods (step 12). Code layout: `code/paths.py`, results in `code/outputs/`, caches in `code/cache/`
 
 Convention: we refer to areas by AOI code (e.g. EMSR517 AOI15), not by town name.

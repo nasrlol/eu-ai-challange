@@ -1,8 +1,11 @@
 //! Flood region API: POST an alerted region, get the model features for it (and, with the
 //! Python scorer, flood risk plus a priority list of cells for allocating rescue resources).
 mod features;
+mod help;
+mod models;
 mod osm;
 mod raster;
+mod roads;
 #[allow(dead_code)] // wired in step by step, see notes/08
 mod types;
 
@@ -129,8 +132,9 @@ fn run(req: RegionRequest) -> Result<Value> {
     Ok(out)
 }
 
-async fn region(Json(req): Json<RegionRequest>) -> (StatusCode, Json<Value>) {
-    match tokio::task::spawn_blocking(move || run(req)).await {
+/// Runs blocking work (Python, SQLite, graph building) off the async runtime; errors become JSON
+async fn blocking(f: impl FnOnce() -> Result<Value> + Send + 'static) -> (StatusCode, Json<Value>) {
+    match tokio::task::spawn_blocking(f).await {
         Ok(Ok(v)) => (StatusCode::OK, Json(v)),
         Ok(Err(e)) => (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"error": format!("{e:#}")}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
@@ -140,7 +144,14 @@ async fn region(Json(req): Json<RegionRequest>) -> (StatusCode, Json<Value>) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let addr = std::env::var("FLOOD_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
-    let app = Router::new().route("/health", get(|| async { "ok" })).route("/region", post(region));
+    let cfg = config();
+    std::fs::create_dir_all(&cfg.out)?;
+    let help = help::Help::open(&cfg.out.join("help.sqlite"), cfg.data.clone())?;
+    let code = std::fs::canonicalize(cfg.scorer.parent().context("FLOOD_SCORER has no folder")?)?;
+    let models = models::Models { python: cfg.python, code, data: cfg.data };
+    let app = Router::new().route("/health", get(|| async { "ok" }))
+        .route("/region", post(|Json(req): Json<RegionRequest>| blocking(move || run(req))))
+        .merge(help::router(help)).merge(models::router(models));
     println!("flood_api listening on http://{addr}");
     axum::serve(tokio::net::TcpListener::bind(&addr).await?, app).await?;
     Ok(())

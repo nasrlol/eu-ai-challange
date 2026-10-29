@@ -80,3 +80,15 @@ Feature recipe (copy exactly):
 | hand, dist_river | corr 0.84 / 0.07; dist median 242 m (OSM) vs 768 m (CEMS) | OSM has denser streams than CEMS hydrography |
 - AUC vs observed flood: API features 0.962, Python (CEMS rivers) 0.973 → OSM rivers cost ~0.01 AUC. (Model trained incl. AOI15, so both optimistic.)
 - Test request: boundary from `processed/` (PRODUCT ∪ MONIT01) is larger than the PRODUCT AOI used by risk_model; compare only inside the PRODUCT AOI.
+
+## Model endpoints (`src/models.rs`, added 2026-10-29)
+Region = `{"type":"bbox","bbox":[w,s,e,n]}` | `{"type":"aoi","aoi":"EMSR517_AOI15_GRA"}` | `{"type":"polygon","geometry":<GeoJSON>}`.
+| Endpoint | Model | How |
+|---|---|---|
+| `GET /models` | all | list + `outputs/eval/summary.csv` |
+| `POST /flood {name, region, floods:[rp10/rp100/rp500/observed/risk>=t], allow_outside}` | risk + access/evacuation | runs `flood_tool.py` → `summary.json` |
+| `POST /timeline {name, region, driver}` | timeline | `driver.type` = `whatif {peak_rp, rise_h, fall_h, step_h}` / `open_meteo {point?, start, end}` / `series {steps:[{time, return_period}]}` → `steps.csv` as JSON |
+| `POST /impact {aoi, cost_eur_m2, max_depth_m}` · `GET /impact` | pipeline (damage €, displaced) | runs `pipeline.py --json` (new flag) · `report/flood_summary.csv` |
+| `GET /roads/{aoi}` · `GET /interp/{aoi}` | road_model, interp_model | stored outputs, filtered by AOI prefix |
+- Python results land in `code/outputs/` (not `FLOOD_OUT`). Flood specs are whitelisted (no file paths).
+- Tested: small bbox in AOI15 /flood + /timeline ~2 s; `/impact` EMSR518_AOI02 = report CSV (38 bldgs, €3.25 M). Big regions take minutes (synchronous).

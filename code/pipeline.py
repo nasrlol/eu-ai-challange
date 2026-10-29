@@ -3,7 +3,7 @@
 Each stage is a function that takes the shared state dict, adds to it, and
 returns it, so stages can be swapped or reordered without touching the others.
 """
-import argparse, geopandas as gpd, numpy as np, rasterio
+import argparse, json, geopandas as gpd, numpy as np, rasterio
 from pathlib import Path
 from main import DEPTH, flood_file, guess_buildings
 
@@ -99,7 +99,10 @@ if __name__ == "__main__":
     p.add_argument("--cost", type=float, default=1500.0, help="replacement cost, €/m² floor area")
     p.add_argument("--max-depth", type=float, default=6.0, help="cap on sampled depth, m")
     p.add_argument("-o", "--out", type=Path, help="write flooded buildings with all model columns to this .gpkg")
+    p.add_argument("--json", type=Path, help="write one summary per flood to this .json (used by flood_api)")
     args = p.parse_args()
+
+    summaries = []
 
     for i, arg in enumerate(args.flood):
         path = flood_file(arg)
@@ -111,3 +114,14 @@ if __name__ == "__main__":
         s = run(path, bld_path, args.depth, args.cost, args.max_depth)
         if args.out:
             s["buildings"][s["buildings"].flooded].to_file(args.out, layer=path.stem, driver="GPKG")
+        bld = s["buildings"]
+        hit = bld[bld.flooded]
+        summaries.append(dict(
+            flood=path.name, flood_km2=s["flood"].to_crs(3035).area.sum() / 1e6, buildings=len(bld),
+            buildings_flooded=len(hit), mean_depth_m=hit.depth.mean() if len(hit) else 0.0,
+            buildings_ge_50pct_damaged=int((hit.damage_frac >= 0.5).sum()), loss_eur_m=hit.loss_eur.sum() / 1e6,
+            people_affected=hit.occupants.sum(), people_displaced=bld.loc[bld.depth >= DISPLACED_M, "occupants"].sum(),
+            assumptions=dict(cost_eur_m2=args.cost, max_depth_m=args.max_depth, m2_per_person=M2_PER_PERSON,
+                             displaced_at_m=DISPLACED_M, depth="EFAS RP100 sampled inside the observed extent")))
+    if args.json:
+        args.json.write_text(json.dumps(summaries, indent=2, default=float))

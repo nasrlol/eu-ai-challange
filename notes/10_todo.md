@@ -35,3 +35,8 @@
 - [ ] Annex 3: AI-generated text in the tool allowed? how to declare
 - [ ] AI sheet (Annex 7): describe the layer + validator
 - [ ] Brief: output = draft for a named actor (e.g. crisis centre), no automatic dispatch
+
+## 4. Help a friend (notes/11)
+- [ ] Restart the 8080 server to load the new endpoints (help + models)
+- [ ] Brief/AI sheet: name the operator (e.g. municipality / Red Cross), GDPR Art. 9, the assumed thresholds
+- [ ] Optional: map view of route.geojson for the policy tool

@@ -7,6 +7,7 @@ use std::{path::Path, time::Duration};
 
 #[path = "pbf.rs"]
 mod pbf;
+pub use pbf::read_roads;
 
 const MIRRORS: [&str; 3] = [
     "https://overpass-api.de/api/interpreter",
@@ -14,6 +15,19 @@ const MIRRORS: [&str; 3] = [
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ];
 const USER_AGENT: &str = "eu-ai-challenge-flood-api/0.1";
+/// Bump when the extracted OSM content changes, so old per-bbox caches are not reused
+const CACHE_VERSION: u32 = 2;
+
+/// Places people can be brought to. `shelter`: OSM-mapped shelters and assembly points.
+/// `candidate_shelter`: schools and sports halls, often used as emergency shelters (an assumption:
+/// OSM does not say which ones are designated, nor their capacity).
+pub fn shelter_kind(k: &str, v: &str) -> Option<&'static str> {
+    match (k, v) {
+        ("social_facility", "shelter") | ("emergency", "assembly_point") => Some("shelter"),
+        ("amenity", "school") | ("leisure", "sports_hall" | "sports_centre") | ("building", "sports_hall") => Some("candidate_shelter"),
+        _ => None,
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Facility {
@@ -36,7 +50,7 @@ pub struct Osm {
 /// The parsed result is cached on disk by bbox.
 pub fn fetch(w: f64, s: f64, e: f64, n: f64, pbf_dir: &Path, cache_dir: &Path) -> Result<Osm> {
     let bb = format!("{s:.4},{w:.4},{n:.4},{e:.4}");
-    let cache = cache_dir.join(format!("osm_{}.json", bb.replace(',', "_")));
+    let cache = cache_dir.join(format!("osm_v{CACHE_VERSION}_{}.json", bb.replace(',', "_")));
     if cache.exists() {
         return Ok(serde_json::from_str(&std::fs::read_to_string(&cache)?)?);
     }
@@ -62,7 +76,11 @@ fn overpass(bb: &str) -> Result<String> {
  relation["waterway"="riverbank"]({bb}););
 out geom;
 (nwr["amenity"~"^(fire_station|hospital|police)$"]({bb});
- nwr["emergency"="ambulance_station"]({bb}););
+ nwr["emergency"~"^(ambulance_station|assembly_point)$"]({bb});
+ nwr["social_facility"="shelter"]({bb});
+ nwr["amenity"="school"]({bb});
+ nwr["leisure"~"^(sports_hall|sports_centre)$"]({bb});
+ nwr["building"="sports_hall"]({bb}););
 out center tags;"#
         );
         let client = reqwest::blocking::Client::builder()
@@ -120,7 +138,7 @@ fn parse(v: &Value) -> Result<Osm> {
         let kind = match (tag("amenity"), tag("emergency")) {
             (a @ ("fire_station" | "hospital" | "police"), _) => Some(a),
             (_, "ambulance_station") => Some("ambulance_station"),
-            _ => None,
+            _ => tags.as_object().into_iter().flatten().find_map(|(k, v)| shelter_kind(k, v.as_str()?)),
         };
         if let Some(kind) = kind {
             let (lon, lat) = match el["type"].as_str() {
