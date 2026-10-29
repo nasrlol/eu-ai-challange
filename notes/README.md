@@ -14,6 +14,14 @@
 12. [12_hosting.md](12_hosting.md): API hosted on valencia (tailnet), service, update steps
 13. [13_api_tests.md](13_api_tests.md): API test campaign: who tests what, bugs/gaps, status
 14. [14_test_resources.md](14_test_resources.md): where tests run (laptop vs valencia), limits, `code/testrun.sh`
-15. [../code/NOTES.md](../code/NOTES.md): build log of the Python models (prompts, methods, results, bugs), final analysis and roadmap for arbitrary floods (step 12). Code layout: `code/paths.py`, results in `code/outputs/`, caches in `code/cache/`
+16. [15_frontend_api.md](15_frontend_api.md): wiring the API into the AI-Challenge/ frontend: decisions, status, limits
+15. [../code/NOTES.md](../code/NOTES.md): build log of the Python models (prompts, methods, results, bugs, decisions, limits). Steps 1–11 data + first models; 12 restructure + roadmap; 13 OSM layers, `flood_tool.py` (any region), DEM depth check; 14 evacuation levels; 15 precision checks + v2 features (`evaluate.py`); 16 `timeline.py` (flood in time + viewer); 17 `evac_sim.py` (human evacuation flow by hour/weather); 18 API test campaign (CLI references, fixes E1, G4). Code layout: `code/paths.py`, results in `code/outputs/`, caches in `code/cache/`
 
 Convention: we refer to areas by AOI code (e.g. EMSR517 AOI15), not by town name.
+
+## House rules (parallel Claude sessions)
+- Record all work in notes/: short bullets in the topical file, index here. Small Edits only, never rewrite another session's text.
+- Layout: Python `code/`, outputs `code/outputs/`, caches `code/cache/`, Rust `flood_api/src/`, raw data only in `working_data/`, temp files in scratchpads.
+- Owners: Rust `flood_api/src` = hackathon-56, `code/*.py` = cems-efas-da; others report bugs to coordinator hackathon-41.
+- Tests: plan, results, bug IDs (B*/E*/G*) only in [13_api_tests.md](13_api_tests.md); test server on valencia :8081, live :8080 untouched; heavy calls under `flock flood_api/out/heavy.lock`.
+- Git: commits/pushes by cems-efas-8c only (user request), only owner-verified code; repo is public → no secrets, hosting notes 12/14 held back pending user decision.

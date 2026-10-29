@@ -83,6 +83,8 @@ if __name__ == "__main__":
         relative_risk=dict(mean=round(float(risk.mean()), 3), share_cells_ge_0_5=round(float((risk >= 0.5).mean()), 3)),
         floods={spec: dict(cells=g2.overall.value_counts().reindex(["Critical", "High", "Elevated", "Low"], fill_value=0).to_dict(),
                            people_flooded_or_cut_off=round(float(g2.people.sum())),
+                           **{k: round(v, 2) if isinstance(v, float) else v
+                              for k, v in access_model.STATS.get(spec, {}).items()},  # buildings, flooded, cut off, roads km
                            evacuation=dict(cells=g2.evac_level.value_counts().reindex(access_model.EVAC_LEVELS, fill_value=0).to_dict(),
                                            people_now=round(float(g2.must_people.sum())), people_early=round(float(g2.early_people.sum())),
                                            people_by_boat_or_air=round(float(g2.air_people.sum())),

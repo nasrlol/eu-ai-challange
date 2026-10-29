@@ -107,3 +107,4 @@ Region = `{"type":"bbox","bbox":[w,s,e,n]}` | `{"type":"aoi","aoi":"EMSR517_AOI1
 - Python failures → 422 with only the last stderr line (no traceback).
 - AOI regions (`/flood`, `/timeline`, `/evacuation`) and `/impact`: AOI checked in Rust first, needs `_DEL`/`_GRA` (else 422), unknown → 404.
 - `/evacuation`: `T=` must be finite; duplicate hours / weathers dropped; `observed` (flood or roads_flood) needs an AOI region; `/flood` same guard.
+- CORS (`tower-http` 0.5 `CorsLayer`, main.rs `cors()`): all routes incl. `/help/*`, `/files`; methods GET/POST/PATCH, header content-type. Origins from env `FLOOD_CORS_ORIGINS` (comma list, default `*`); bad origin → server refuses to start. Tested: OPTIONS preflight → `access-control-allow-*`; with a list, unlisted origins get no allow-origin header. Tighten before any public deploy.
