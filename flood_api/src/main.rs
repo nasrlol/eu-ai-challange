@@ -7,6 +7,7 @@ mod models;
 mod osm;
 mod raster;
 mod region_check;
+mod reuse;
 mod roads;
 mod types;
 
@@ -46,7 +47,8 @@ struct RegionRequest {
     bbox: Option<[f64; 4]>,
     /// GeoJSON Polygon geometry, or a Feature holding one (lon/lat); outer ring only
     polygon: Option<Value>,
-    /// Same as the model routes: {"type":"bbox","bbox":[..]} or {"type":"polygon","geometry":{..}}
+    /// Same as the model routes: {"type":"bbox","bbox":[..]}, {"type":"polygon","geometry":{..}} or
+    /// {"type":"aoi","aoi":"EMSR517_AOI06_DEL"} (the AOI outline)
     region: Option<Value>,
     #[serde(default = "yes")]
     score: bool,
@@ -61,7 +63,7 @@ fn yes() -> bool { true }
 fn top_n() -> usize { 20 }
 const MAX_TOP_N: usize = 500;
 
-fn ring(req: &RegionRequest) -> Result<Vec<(f64, f64)>> {
+fn ring(req: &RegionRequest, gpkg: &std::path::Path) -> Result<Vec<(f64, f64)>> {
     let (mut bbox, mut polygon) = (req.bbox, req.polygon.as_ref());
     if let Some(r) = &req.region {
         if bbox.is_some() || polygon.is_some() {
@@ -70,8 +72,11 @@ fn ring(req: &RegionRequest) -> Result<Vec<(f64, f64)>> {
         match r["type"].as_str() {
             Some("bbox") => bbox = Some(serde_json::from_value(r["bbox"].clone()).context("region.bbox must be [west, south, east, north]")?),
             Some("polygon") => polygon = Some(&r["geometry"]),
-            Some("aoi") => bail!("/region takes a bbox or polygon; for a CEMS AOI use /flood, /timeline or /evacuation"),
-            _ => bail!("region.type must be bbox or polygon"),
+            Some("aoi") => {
+                let aoi = r["aoi"].as_str().context("region.aoi must be an AOI code, e.g. EMSR517_AOI06_DEL")?;
+                return Ok(region_check::aoi_ring(gpkg, aoi)?.1);
+            }
+            _ => bail!("region.type must be bbox, polygon or aoi"),
         }
     }
     if let Some([w, s, e, n]) = bbox {
@@ -112,8 +117,8 @@ fn run(req: RegionRequest) -> Result<Value> {
     if req.top_n > MAX_TOP_N {
         bail!("top_n must be at most {MAX_TOP_N}; the full grid is in files.risk");
     }
-    let ring = ring(&req)?;
     let outputs = std::fs::canonicalize(cfg.scorer.parent().context("FLOOD_SCORER has no folder")?)?.join("outputs");
+    let ring = ring(&req, &outputs.join("region/study_region.gpkg"))?;
     // everything cheap first: an oversized or outside region must not reach the OSM / raster build
     let km2 = region_check::check(&ring, &outputs.join("region/study_region.gpkg"))?;
     let dir = outputs.join("api_region").join(&req.name); // served by GET /files
@@ -213,7 +218,8 @@ fn run(req: RegionRequest) -> Result<Value> {
 /// Cells worth drawing (model risk >= 0.2 or wet in any EFAS scenario) as 100 m squares in lon/lat,
 /// properties kept short for the browser: r = risk, d10 / d100 / d500 = EFAS depth in m, pop =
 /// people in the cell (GHS-POP, as in the risk summary), elev = DEM metres (the app's "Animate this
-/// area" fills from low to high ground)
+/// area" fills from low to high ground), id = "<x>_<y>" cell centre in EPSG:3035 metres (the same id as
+/// /timeline cells.geojson for the same region)
 fn write_cells(path: &std::path::Path, reg: &features::Region, risk: &[f32]) -> Result<PathBuf> {
     let laea = features::Laea::new();
     let h = GRID_M / 2.0;
@@ -224,7 +230,7 @@ fn write_cells(path: &std::path::Path, reg: &features::Region, risk: &[f32]) -> 
             .map(|&(dx, dy)| { let (lon, lat) = laea.inv(x + dx, y + dy); [r(lon, 1e5), r(lat, 1e5)] }).collect();
         let f = &reg.feats[i];
         json!({"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [ring]},
-               "properties": {"r": r(risk[i] as f64, 100.0), "d10": r(f[5] as f64, 100.0), "d100": r(f[6] as f64, 100.0), "d500": r(f[7] as f64, 100.0),
+               "properties": {"id": format!("{:.0}_{:.0}", x, y), "r": r(risk[i] as f64, 100.0), "d10": r(f[5] as f64, 100.0), "d100": r(f[6] as f64, 100.0), "d500": r(f[7] as f64, 100.0),
                               "pop": r(types::people(reg.pop_density[i]) as f64, 10.0), "elev": r(f[0] as f64, 10.0)}})
     }).collect();
     std::fs::write(path, json!({"type": "FeatureCollection", "features": feats}).to_string())?;
@@ -452,6 +458,8 @@ async fn main() -> Result<()> {
         .route("/point", get(|extract::QueryArgs(q): extract::QueryArgs<PointQuery>| blocking(move || point(q))))
         .merge(help::router(help)).merge(models::router(models))
         .route("/jobs/:id", get(jobs::get).with_state(jobs.clone()))
+        // reuse inside jobs: an async request with "reuse": true also gets the stored answer
+        .layer(axum::middleware::from_fn_with_state(cfg.out.join("reuse"), reuse::layer))
         .layer(axum::middleware::from_fn_with_state(jobs, jobs::layer))
         .layer(cors()?);
     println!("flood_api listening on http://{addr}");

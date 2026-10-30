@@ -37,6 +37,7 @@ ssh "$HOST" "mkdir -p ~/$dest && ln -sfn ~/$LIVE/working_data ~/$dest/working_da
 rsync -a --delete \
   --exclude .git --exclude .venv --exclude working_data --exclude 'flood_api/target' \
   --exclude 'code/outputs' --exclude __pycache__ --exclude '*.zip' \
+  --exclude AI-Challenge --exclude policy_api --exclude docs \
   "$ROOT/" "$HOST:$dest/"
 
 cmd=$(printf '%q ' "$@")

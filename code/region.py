@@ -1,13 +1,15 @@
 """Study region: the convex hull around all CEMS PRODUCT areas of interest.
 
 Arbitrary floods are only estimated inside this hull; the AOIs themselves are where we have labels.
-Writes outputs/region/study_region.gpkg with two layers: `hull` and `aois`.
+Writes outputs/region/study_region.gpkg with two layers: `hull` and `aois`, and the same as one
+lon/lat GeoJSON for the browser (outputs/region/study_region.geojson, served by GET /files).
 """
-import geopandas as gpd, shapely
+import geopandas as gpd, pandas as pd, shapely
 from main import DATA
 from paths import OUTPUTS
 
 OUT = OUTPUTS / "region" / "study_region.gpkg"
+GEOJSON = OUT.with_suffix(".geojson")
 
 
 def aois():
@@ -25,7 +27,15 @@ def hull():
         OUT.parent.mkdir(parents=True, exist_ok=True)
         a.to_file(OUT, layer="aois", driver="GPKG")
         gpd.GeoDataFrame(dict(name=["study_region"]), geometry=[a.union_all().convex_hull], crs=3035).to_file(OUT, layer="hull", driver="GPKG")
-    return gpd.read_file(OUT, layer="hull").geometry.iloc[0]
+    h = gpd.read_file(OUT, layer="hull")
+    if not GEOJSON.exists():
+        # kind = study_region (where the models run) | aoi (CEMS area with 2021 labels, name = area code)
+        a = gpd.read_file(OUT, layer="aois").rename(columns={"area": "name"}).assign(kind="aoi")
+        both = pd.concat([h.assign(kind="study_region"), a], ignore_index=True)[["kind", "name", "geometry"]]
+        both = gpd.GeoDataFrame(both, crs=3035).to_crs(4326)
+        both["geometry"] = both.geometry.simplify(0.0002)  # ~20 m: keeps the file small
+        both.to_file(GEOJSON, driver="GeoJSON", COORDINATE_PRECISION=5)
+    return h.geometry.iloc[0]
 
 
 if __name__ == "__main__":

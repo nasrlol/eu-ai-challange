@@ -12,7 +12,8 @@ Each step: return period T → depth map (EFAS RP10/100/500 blended on log T, ch
   python3 timeline.py --region 6.9,50.45,7.15,50.58 --peak-rp 500 --name ahr_whatif
 
 Writes outputs/timelines/<name>/: steps.csv, depth_<step>.tif, cells.gpkg (one layer per step),
-viewer.html (map + time slider; open in a browser).
+cells.geojson (100 m cells, the same grid and ids as flood_api /region, depth per step), viewer.html
+(map + time slider; open in a browser).
 """
 import argparse, base64, io, json, sys, urllib.request
 import geopandas as gpd, numpy as np, pandas as pd, rasterio, shapely
@@ -105,6 +106,40 @@ def depth_grid(area, geom):
         d[inside] = area.depth(rp, xy[inside])
         rps[rp] = d.reshape(glon.shape)
     return dict(bounds=(w, s, e, n), shape=glon.shape, inside=inside.reshape(glon.shape), tf=from_origin(w, n, GRID_DEG, GRID_DEG), **rps)
+
+
+CELL_M = 100  # flood_api /region grid
+
+
+def region_cells(geom, grid, depths, steps, water):
+    """Depth per step on the 100 m cells of flood_api /region (features.rs `build`): centres from the
+    region's EPSG:3035 bounds (west + 50 m, north - 50 m), inside the region and outside OSM water,
+    id "<x>_<y>" as in /region cells.geojson. A multi-part AOI is gridded from its largest part's
+    bounds, as /region does, so the ids line up. Only cells that get wet in some step are kept."""
+    part = max(getattr(geom, "geoms", [geom]), key=lambda g: g.area)
+    x0, y0, x1, y1 = part.bounds
+    xs = x0 + CELL_M / 2 + CELL_M * np.arange(int(np.ceil((x1 - x0 - CELL_M / 2) / CELL_M)))
+    ys = y1 - CELL_M / 2 - CELL_M * np.arange(int(np.ceil((y1 - y0 - CELL_M / 2) / CELL_M)))
+    xs, ys = xs[xs < x1], ys[ys > y0]
+    gx, gy = np.meshgrid(xs, ys)
+    x, y = gx.ravel(), gy.ravel()
+    keep = shapely.contains_xy(geom, x, y)
+    if len(water):
+        keep &= ~shapely.contains_xy(water.union_all(), x, y)
+    x, y = x[keep], y[keep]
+    lon, lat = TO_3035.transform(x, y, direction="INVERSE")
+    col, row = ~grid["tf"] * (lon, lat)
+    row = np.clip(np.floor(row).astype(int), 0, grid["shape"][0] - 1)
+    col = np.clip(np.floor(col).astype(int), 0, grid["shape"][1] - 1)
+    d = np.round(np.stack([np.maximum(dd[row, col], 0) for dd in depths], axis=1), 2)
+    wet = d.max(axis=1) > 0
+    h = CELL_M / 2
+    feats = []
+    for xi, yi, di in zip(x[wet], y[wet], d[wet]):
+        cx, cy = TO_3035.transform(np.array([xi - h, xi + h, xi + h, xi - h, xi - h]), np.array([yi - h, yi - h, yi + h, yi + h, yi - h]), direction="INVERSE")
+        feats.append(dict(type="Feature", geometry=dict(type="Polygon", coordinates=[[[round(a, 5), round(b, 5)] for a, b in zip(cx, cy)]]),
+                          properties=dict(id=f"{xi:.0f}_{yi:.0f}", d=[float(v) for v in di])))
+    return dict(type="FeatureCollection", steps=steps, features=feats)
 
 
 def png_b64(arr, cmap, vmax, alpha_mask):
@@ -235,9 +270,10 @@ def main():
     fac = fac[shapely.contains_xy(geom.buffer(2000), *shapely.get_coordinates(fac.geometry.values).T)].to_crs(4326)
     fac["label"] = fac.amenity.str.replace("_", " ") + fac.name.fillna("").map(lambda n: f": {n}" if n else "")
 
-    rows, js_steps = [], []
+    rows, js_steps, step_depths = [], [], []
     for i, r in steps.reset_index(drop=True).iterrows():
         d = blend_T(r["T"], grid["rp10"], grid["rp100"], grid["rp500"])
+        step_depths.append(np.where(grid["inside"], d, 0))
         write_tif(out / f"depth_{i:02d}.tif", np.where(grid["inside"], d, -1), grid["tf"])
         label = access_model.flood_label(f"T={r['T']:g}")
         c = gdf[gdf["flood"] == label] if gdf is not None and r["T"] > 2 else None
@@ -260,6 +296,9 @@ def main():
               f"evacuate now {row['people_now']:7.0f}  early {row['people_early']:7.0f}", flush=True)
 
     pd.DataFrame(rows).round(2).to_csv(out / "steps.csv", index=False)
+    fc = region_cells(geom, grid, step_depths, [dict(step=r["step"], time=r["time"], T=r["T"]) for r in rows],
+                      access_model.osm_data.layer("water", geom))
+    (out / "cells.geojson").write_text(json.dumps(fc, separators=(",", ":")))
     data = dict(bounds=grid["bounds"], steps=js_steps,
                 region=json.loads(gpd.GeoSeries([geom], crs=3035).to_crs(4326).to_json()),
                 facilities=json.loads(fac[["label", "geometry"]].to_json()))
@@ -268,7 +307,7 @@ def main():
                      "below a 2-year flow rivers are assumed to stay in their banks.")
             .replace("__DATA__", json.dumps(data, default=float)))
     (out / "viewer.html").write_text(html)
-    print(f"\nWrote {out}/: steps.csv, depth_<step>.tif, cells.gpkg, viewer.html")
+    print(f"\nWrote {out}/: steps.csv, depth_<step>.tif, cells.gpkg, cells.geojson ({len(fc['features']):,} cells), viewer.html")
 
 
 if __name__ == "__main__":

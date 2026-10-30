@@ -268,7 +268,7 @@ def run(region, flood="rp100", hours=(3, 8, 13, 17), weekday=True, weather="dry"
         closed, roads_label = access_model.state(ctx, area, roads_flood)["edge_wet"], f"roads closed as at {roads_flood}"
     closed_gdf = edges_gdf(ctx["net"], dict(status=np.where(closed, "flooded (closed)", "")), closed)
 
-    runs, summaries = [], []
+    runs, summaries, geojson = [], [], dict(roads={}, cells={})
     for w in weathers:
         for h in hours:
             roads, bld, s = simulate(ctx, st, h, weekday, w, closed)
@@ -278,9 +278,14 @@ def run(region, flood="rp100", hours=(3, 8, 13, 17), weekday=True, weather="dry"
             r.to_file(out / f"roads_{tag}.gpkg", driver="GPKG")
             c.to_file(out / f"cells_{tag}.gpkg", driver="GPKG")
             summaries.append(dict(s, run=tag))
+            view_roads, view_cells = _view_roads(r).to_json(), c.to_crs(4326).round(2).to_json()
+            # browser copies (lon/lat): car routes with cars, v/c, level, clear_h per merged stretch; cells as in the viewer
+            for kind, text in (("roads", view_roads), ("cells", view_cells)):
+                path = out / f"{kind}_{tag}.geojson"
+                path.write_text(text)
+                geojson[kind][tag] = str(path)
             runs.append(dict(label=f"{h:02d}:00 {'weekday' if weekday else 'weekend'}, {w.replace('_', ' ')}", summary=s,
-                             roads=json.loads(_view_roads(r).to_json()),
-                             cells=json.loads(c.to_crs(4326).round(2).to_json())))
+                             roads=json.loads(view_roads), cells=json.loads(view_cells)))
             print(f"  {tag}: {s['evacuees']:,.0f} evacuees, {s['cars']:,.0f} cars, {s['boat_or_air']:,.0f} boat/air, "
                   f"{s['roads_congested_km']:.1f} km congested, 95% safe after {s['time_to_safety_p95_h']} h", flush=True)
 
@@ -291,7 +296,7 @@ def run(region, flood="rp100", hours=(3, 8, 13, 17), weekday=True, weather="dry"
                   caveats=flood_tool.CAVEATS + ["Behaviour (who is home, compliance, cars, capacities, weather effects) is assumed, not fitted: "
                                                 "no evacuation data exists for this region. Static assignment: everyone takes the fastest route "
                                                 "computed before congestion; no rerouting, no contraflow."],
-                  files=dict(folder=str(out), viewer=str(out / "viewer.html")))
+                  files=dict(folder=str(out), viewer=str(out / "viewer.html"), roads_geojson=geojson["roads"], cells_geojson=geojson["cells"]))
     (out / "summary.json").write_text(json.dumps(result, indent=2, default=float))
     bounds = gpd.GeoSeries([geom], crs=3035).to_crs(4326).total_bounds.tolist()
     data = dict(bounds=bounds, runs=runs, closed=json.loads(_slim(closed_gdf)[["geometry"]].to_json()))

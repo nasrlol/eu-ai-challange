@@ -283,14 +283,31 @@ enum Driver {
     Whatif { peak_rp: f64, #[serde(default = "h24")] rise_h: f64, #[serde(default = "h72")] fall_h: f64, #[serde(default = "h6")] step_h: f64 },
     /// GloFAS discharge from Open-Meteo at a river point (default: region centre)
     OpenMeteo { point: Option<[f64; 2]>, start: String, end: String },
-    /// Own series of return periods
-    Series { steps: Vec<SeriesStep> },
+    /// Own series: every step gives a return_period, or every step a discharge (m³/s) and then q10 and
+    /// q100 (the river's 10- and 100-year discharges) turn it into return periods (Gumbel)
+    Series { steps: Vec<SeriesStep>, q10: Option<f64>, q100: Option<f64> },
 }
 #[derive(Deserialize)]
 struct SeriesStep {
     time: String,
-    return_period: f64,
+    return_period: Option<f64>,
+    discharge: Option<f64>,
 }
+#[derive(Deserialize)]
+struct LayersReq {
+    name: String,
+    region: Region,
+}
+
+/// Buildings, town names and shelters (estimated places) of a region as GeoJSON (area_layers.py)
+fn layers(m: &Models, req: LayersReq) -> Result<Value> {
+    check_name(&req.name)?;
+    let args = vec!["--region".into(), m.region_arg(&req.region, &req.name)?, "--name".into(), req.name.clone()];
+    m.python("area_layers.py", &args)?;
+    let path = m.out().join("layers").join(&req.name).join("summary.json");
+    Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+}
+
 fn h24() -> f64 { 24.0 }
 fn h72() -> f64 { 72.0 }
 fn h6() -> f64 { 6.0 }
@@ -324,14 +341,31 @@ fn timeline(m: &Models, req: TimelineReq) -> Result<Value> {
             }
             args.extend(["--start".into(), start.clone(), "--end".into(), end.clone()]);
         }
-        Driver::Series { steps } => {
+        Driver::Series { steps, q10, q100 } => {
+            let by_rp = steps.iter().all(|s| s.return_period.is_some());
+            let by_q = steps.iter().all(|s| s.discharge.is_some());
+            if steps.is_empty() || !(by_rp || by_q) {
+                bail!("series: give every step a return_period, or every step a discharge (with q10 and q100)");
+            }
             let dir = m.out().join("api_regions");
             std::fs::create_dir_all(&dir)?;
             let path = dir.join(format!("{}_series.csv", req.name));
             let mut wr = csv::Writer::from_path(&path)?;
-            wr.write_record(["time", "return_period"])?;
-            for s in steps {
-                wr.write_record([s.time.as_str(), &s.return_period.to_string()])?;
+            if by_rp {
+                wr.write_record(["time", "return_period"])?;
+                for s in steps {
+                    wr.write_record([s.time.as_str(), &s.return_period.unwrap().to_string()])?;
+                }
+            } else {
+                let (Some(q10), Some(q100)) = (q10, q100) else { bail!("a discharge series needs q10 and q100 (m³/s)") };
+                if !(q10.is_finite() && q100.is_finite() && 0.0 < *q10 && q10 < q100) {
+                    bail!("q10 and q100 must be positive with q10 < q100");
+                }
+                wr.write_record(["time", "discharge"])?;
+                for s in steps {
+                    wr.write_record([s.time.as_str(), &s.discharge.unwrap().to_string()])?;
+                }
+                args.extend(["--q10".into(), q10.to_string(), "--q100".into(), q100.to_string()]);
             }
             wr.flush()?;
             args.extend(["--series".into(), path.to_string_lossy().into()]);
@@ -340,7 +374,8 @@ fn timeline(m: &Models, req: TimelineReq) -> Result<Value> {
     m.python("timeline.py", &args)?;
     let dir = m.out().join("timelines").join(&req.name);
     Ok(json!({"name": req.name, "steps": csv_rows(&dir.join("steps.csv"), |_, _| true)?,
-              "files": {"dir": dir, "viewer": dir.join("viewer.html"), "cells": dir.join("cells.gpkg")}}))
+              "files": {"dir": dir, "viewer": dir.join("viewer.html"), "cells": dir.join("cells.gpkg"),
+                        "cells_geojson": dir.join("cells.geojson")}}))
 }
 
 #[derive(Deserialize)]
@@ -391,6 +426,8 @@ fn models_list(m: &Models) -> Result<Value> {
              "endpoints": ["GET /roads/{aoi}"], "runs_on": "precomputed for the CEMS AOIs"},
             {"name": "interp", "script": "interp_model.py", "what": "flood extent between two CEMS observations",
              "endpoints": ["GET /interp/{aoi}"], "runs_on": "precomputed for CEMS AOIs with PRODUCT + MONIT01"},
+            {"name": "layers", "script": "area_layers.py", "what": "buildings (height, people, depth per scenario), town names, shelters with estimated places, as GeoJSON",
+             "endpoints": ["POST /layers"], "runs_on": "any region in the study area (at most 300,000 buildings)"},
             {"name": "help_a_friend", "script": "flood_api/src/help.rs", "what": "match helpers to people with a disability, flood-aware routes",
              "endpoints": ["POST /help/zones", "POST /helpers", "POST /help-requests"], "runs_on": "any zone covered by the OSM extracts"},
         ],
@@ -409,7 +446,8 @@ fn roads(m: &Models, aoi: &str) -> Result<Value> {
         "aoi": aoi, "exposure_km": exposure,
         "damage_validation": csv_rows(&dir.join("damage_validation.csv"), by_aoi("area", aoi))?,
         "closure_timeline": csv_rows(&dir.join("closure_timeline.csv"), by_aoi("pair", aoi))?,
-        "files": {"roads_at_risk": dir.join("roads_at_risk.gpkg")}, "caveat": ROAD_DAMAGE_NOTE,
+        "files": {"roads_at_risk": dir.join("roads_at_risk.gpkg"), "roads_geojson": geojson_for(&dir, aoi)},
+        "caveat": ROAD_DAMAGE_NOTE,
     }))
 }
 
@@ -420,7 +458,19 @@ fn interp(m: &Models, aoi: &str) -> Result<Value> {
     if rows.is_empty() {
         return Err(NotFound(format!("no interpolated extents for {aoi} (needs PRODUCT + MONIT01 that overlap)")).into());
     }
-    Ok(json!({"aoi": aoi, "timeseries": rows, "files": {"extents": dir.join("extents.gpkg")}}))
+    Ok(json!({"aoi": aoi, "timeseries": rows,
+              "files": {"extents": dir.join("extents.gpkg"), "extents_geojson": geojson_for(&dir, aoi)}}))
+}
+
+/// Browser copies written by code/export_geojson.py (<dir>/geojson/<AOI or pair>.geojson) for this AOI,
+/// keyed by file stem; empty when not exported
+fn geojson_for(dir: &std::path::Path, aoi: &str) -> std::collections::BTreeMap<String, PathBuf> {
+    std::fs::read_dir(dir.join("geojson")).into_iter().flatten().flatten()
+        .filter_map(|f| {
+            let stem = f.path().file_stem()?.to_str()?.to_owned();
+            (f.path().extension()? == "geojson" && (stem == aoi || stem.starts_with(&format!("{aoi}_")))).then(|| (stem, f.path()))
+        })
+        .collect()
 }
 
 fn impact_all(m: &Models) -> Result<Value> {
@@ -467,6 +517,7 @@ pub fn router(models: Models) -> Router {
         .route("/models", get(|State(m): State<Models>| blocking(move || models_list(&m).map(|v| m.public(v)))))
         .route("/flood", post(|State(m): State<Models>, JsonBody(r): JsonBody<FloodReq>| blocking(move || flood(&m, r).map(|v| m.public(v)))))
         .route("/evacuation", post(|State(m): State<Models>, JsonBody(r): JsonBody<EvacReq>| blocking(move || evacuation(&m, r).map(|v| m.public(v)))))
+        .route("/layers", post(|State(m): State<Models>, JsonBody(r): JsonBody<LayersReq>| blocking(move || layers(&m, r).map(|v| m.public(v)))))
         .route("/timeline", post(|State(m): State<Models>, JsonBody(r): JsonBody<TimelineReq>| blocking(move || timeline(&m, r).map(|v| m.public(v)))))
         .route("/impact", get(|State(m): State<Models>| blocking(move || impact_all(&m).map(|v| m.public(v))))
             .post(|State(m): State<Models>, JsonBody(r): JsonBody<ImpactReq>| blocking(move || impact(&m, r).map(|v| m.public(v)))))
