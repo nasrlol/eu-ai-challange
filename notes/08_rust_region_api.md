@@ -2,6 +2,8 @@
 
 Goal: input = region with a flood alert (bbox / polygon, lon/lat) → fetch data → features that match our models.
 
+Hosted copy: see [12_hosting.md](12_hosting.md) (valencia, systemd `flood-api`, update steps).
+
 ## Model contract (from `code/`)
 | Model | Features | Grid |
 |---|---|---|
@@ -46,7 +48,7 @@ Feature recipe (copy exactly):
 - 1 M rows: save 0.03 s, load 0.02 s; JSON round trip 45 s.
 - Changing `FEATURES` changes the layout, so update the Rust writer too.
 
-## Data structures: `flood_api/src/types.rs` (designed, not wired in yet)
+## Data structures: `flood_api/src/types.rs` (first design; superseded by "/region v2" below)
 | Stage | Types |
 |---|---|
 | Request | `RegionRequest { name, area, scenarios, options }`; `Area` = `bbox` / `polygon` / `aoi` (tagged by `"type"`); `Scenario` = rp10/rp100/rp500; `Options { score, facilities, top_n=20 }` |
@@ -76,7 +78,62 @@ Feature recipe (copy exactly):
 | Feature | API vs Python | Why |
 |---|---|---|
 | elev, slope, relief | median diff 0, corr ≥ 0.96 | same recipe |
-| rp10/100/500 | API = raw EFAS exactly; Python differs on 4.7 % of cells | **bug in risk_model.py**: fractional `from_bounds` window → data read rounded, transform not → EFAS shifted ≤ 1 px (~90 m). Fix: `win = from_bounds(...).round_offsets().round_lengths()`, then `--rebuild` + retrain |
-| hand, dist_river | corr 0.84 / 0.07; dist median 242 m (OSM) vs 768 m (CEMS) | OSM has denser streams than CEMS hydrography |
+| rp10/100/500 | API = raw EFAS exactly; Python differs on 4.7 % of cells | **bug in risk_model.py**: fractional `from_bounds` window → data read rounded, transform not → EFAS shifted ≤ 1 px (~90 m). **Fixed** (whole-pixel window, retrained; code/NOTES.md after step 13) |
+| hand, dist_river | corr 0.84 / 0.07; dist median 242 m (OSM) vs 768 m (CEMS) | OSM has denser streams than CEMS hydrography  **Closed**: model retrained on OSM rivers (`RIVERS = "osm"`), same source as the API; held-out AUC 0.923 vs 0.922 |
 - AUC vs observed flood: API features 0.962, Python (CEMS rivers) 0.973 → OSM rivers cost ~0.01 AUC. (Model trained incl. AOI15, so both optimistic.)
 - Test request: boundary from `processed/` (PRODUCT ∪ MONIT01) is larger than the PRODUCT AOI used by risk_model; compare only inside the PRODUCT AOI.
+
+## Model endpoints (`src/models.rs`, added 2026-10-29)
+Region = `{"type":"bbox","bbox":[w,s,e,n]}` | `{"type":"aoi","aoi":"EMSR517_AOI15_GRA"}` | `{"type":"polygon","geometry":<GeoJSON>}`.
+| Endpoint | Model | How |
+|---|---|---|
+| `GET /models` | all | list + `outputs/eval/summary.csv` |
+| `POST /flood {name, region, floods:[rp10/rp100/rp500/observed/risk>=t], allow_outside}` | risk + access/evacuation | runs `flood_tool.py` → `summary.json` |
+| `POST /timeline {name, region, driver}` | timeline | `driver.type` = `whatif {peak_rp, rise_h, fall_h, step_h}` / `open_meteo {point?, start, end}` / `series {steps:[{time, return_period}]}` → `steps.csv` as JSON |
+| `POST /impact {aoi, cost_eur_m2, max_depth_m}` · `GET /impact` | pipeline (damage €, displaced) | runs `pipeline.py --json` (new flag) · `report/flood_summary.csv` |
+| `GET /roads/{aoi}` · `GET /interp/{aoi}` | road_model, interp_model | stored outputs, filtered by AOI prefix |
+| `POST /evacuation {name, region, flood, roads_flood, hours, weekend, weather}` | evac_sim (human evacuation flow) | `python3 code/evac_sim.py --region <w,s,e,n or AOI> --flood <rp100/T=500/…> [--roads-flood none\|T=10\|…] [--hours 3 8 17] [--weekend] [--weather dry rain heavy_rain fog snow] --name <name>` → `code/outputs/evacuations/<name>/summary.json` (+ `roads_<HHh_weather>.gpkg`, `cells_<…>.gpkg`, `viewer.html`). Exit code ≠ 0 + message on bad region/weather. ~5 s small bbox, ~1 min dense 450 km². API validates flood (`rp*`/`T=`/`observed`), roads_flood (+`none`), hours 0–23, weather ∈ dry/rain/heavy_rain/fog/snow; returns summary.json; listed in `/models`. |
+- Python results land in `code/outputs/` (not `FLOOD_OUT`). Flood specs are whitelisted (no file paths).
+- Tested: small bbox in AOI15 /flood + /timeline ~2 s; `/impact` EMSR518_AOI02 = report CSV (38 bldgs, €3.25 M). Big regions take minutes (synchronous).
+- AOI paths (`/roads/{aoi}`, `/interp/{aoi}`): must match `EMSR\d{3}_AOI\d{2}(_DEL|_GRA)?` → else 422; valid but no results → 404. Match = exact or `aoi_…` (no loose prefixes).
+- `GET /files/{path}`: read-only, serves files under `code/outputs/` only (canonicalised; `..`/symlinks outside → 404); folder → JSON listing. Content-type by extension (html, json, csv, tif, gpkg, pdf, png).
+- All model responses (`/models`, `/flood`, `/timeline`, `/impact`, `/evacuation`, `/roads`, `/interp`) rewrite absolute paths under `code/outputs/` to `/files/…` URLs. `/region` (writes to `FLOOD_OUT`) not yet.
+- `/flood` files: + `danger.{flood}` and `evacuation.{flood}` CSV URLs, `summary`.
+- `NotFound` error type (main.rs) → 404; other errors stay 422.
+- `/region` validation (`src/region_check.rs`) runs BEFORE OSM/raster work, 422 in < 5 ms: inverted / zero-area bbox, < 0.01 km², > 3000 km², > 1 % outside the study hull (same `study_region.gpkg` + rule as flood_tool). Polygon may be a geometry or a Feature; other types → 422.
+- `/region` facility counts: `facilities` = inside the region only; `facilities_nearby_outside` = in the 0.02° pad (still used for distances). geojson features carry `inside`.
+- `/region` outputs moved from `FLOOD_OUT/<name>` to `code/outputs/api_region/<name>`, returned as `/files/…` URLs (FLOOD_OUT keeps cache + help.sqlite).
+- Errors (all JSON `{"error"}`): 400 unparseable JSON · 404 unknown AOI / zone / helper / request · 409 state conflict (helper busy, request already assigned/done) · 422 everything else. axum rejections (body, query, path) wrapped by `extract::{JsonBody, QueryArgs, PathArg}` in main.rs.
+- Python failures → 422 with only the last stderr line (no traceback).
+- AOI regions (`/flood`, `/timeline`, `/evacuation`) and `/impact`: AOI checked in Rust first, needs `_DEL`/`_GRA` (else 422), unknown → 404.
+- `/evacuation`: `T=` must be finite; duplicate hours / weathers dropped; `observed` (flood or roads_flood) needs an AOI region; `/flood` same guard.
+- CORS (`tower-http` 0.5 `CorsLayer`, main.rs `cors()`): all routes incl. `/help/*`, `/files`; methods GET/POST/PATCH, header content-type. Origins from env `FLOOD_CORS_ORIGINS` (comma list, default `*`); bad origin → server refuses to start. Tested: OPTIONS preflight → `access-control-allow-*`; with a list, unlisted origins get no allow-origin header. Tighten before any public deploy.
+- `/flood` `files.danger` / `files.evacuation` list only this request's floods (label = `flood_label`: `risk>=0.5` → `risk_ge_0.5`); older CSVs in a reused folder are left on disk but not listed. `/timeline`, `/evacuation` return fixed file names (no globbing).
+- `/impact`: `cost_eur_m2`, `max_depth_m` must be finite and > 0 → else 422 (−5 gave a negative € loss).
+
+## /region v2 (cems-efas-72, 2026-10-29 evening)
+- Request (old shape still works): `{name, bbox | polygon | region:{type:bbox|polygon}, score=true, top_n=20 (≤500), scenarios=[rp10,rp100,rp500]}`. `region.type=aoi` → 422 (use /flood etc.).
+- Response = `types::RegionResponse`: name, cells, area_km2, river_points, facilities, facilities_nearby_outside, `risk`, `region_check`, `files`, `sources`, `caveats`.
+- `risk`: mean, high_risk_km2, people_in_high_risk_approx, **`risk_weighted_people_index`** (was `expected_people_flooded_approx`), `by_scenario` [{scenario, flooded_km2 (>0 m), deep_km2 (≥0.3 m), people_approx, max_depth_m}], `priority_cells` [{rank, lon, lat, risk, people, dist_fire_station_m, dist_hospital_m (straight-line, null if none), overall, factors}].
+- Factors = all 8 of access_model.FACTORS (+ `help_km` added to types): likelihood, people, help_km (straight-line) computed; the 5 needing roads/buildings `not_available` with value null → use /flood.
+- `region_check` (from `score_region.py` → `risk_check.json`): % cells outside training 1–99 pct per feature + any, nearest training AOI, km, its held-out AUC. > 10 % outside → extra caveat. Ranges cached in `outputs/risk/feature_ranges.json` (rebuilt when model.joblib is newer).
+- Handoff: Rust writes `grid.npy` (grid_io layout, `types::write_npy`); scorer reads npy (csv still accepted), writes `risk.csv` = x, y, risk only. `features.csv` kept as download.
+- Async (all POST routes, `src/jobs.rs`): `?async=1` → 202 `{job, status_url}`; `GET /jobs/{id}` → 202 running / route's own status + body. In memory, 6 h, lost on restart.
+- 2026-10-30: `/region` also writes `cells.geojson` (`files.cells`): 100 m squares in lon/lat for cells with risk ≥ 0.2 or EFAS rp500 > 0; props `r`, `d10`, `d100`, `d500` (2 decimals). Study bbox 25k cells → 654 KB.
+- 2026-10-30: `GET /point?lon&lat` (< 0.1 s, no OSM/model): raw EFAS depth per RP at the pixel + nearest pixel ≥ 0.3 m within ~300 m. Level per RP: ≥ 1 m / ≥ 0.3 m here → `danger`; water ≥ 0.3 m within 100 m or < 0.3 m here → `at_risk`; else `safe`; overall = worst. Same study-region check as /region (~600 m box). Note: 1 km cell centres from /flood are often dry pixels; EFAS includes river channels (12 m "depth").
+
+## OSM store (2026-10-30, `src/osm_store.rs`)
+- Why: every new bbox re-read the extracts (2 GB, 2 passes): `/region` 2–3 min, `/help/zones` ~3.5 min; the per-bbox JSON cache only helped for the identical bbox.
+- Build once: `flood_api build-osm-store` → `<FLOOD_OUT>/osm_store` (or `FLOOD_OSM_STORE`). Study hull bbox + 0.15°; 4 parallel passes per extract (relations → needed node ids → node coords → ways), keeps rivers, water, water-relation outers, facilities, shelters, routable roads with full node lists. 0.1° tiles (bincode), way in every tile it touches; atomic swap of the folder.
+- valencia: 146 s, 3.42 M ways, 4,455 facility points, 691 tiles, 802 MB.
+- Query: tiles of the bbox (parallel load, in-memory LRU ≤ 1 GB), dedupe ways by id, same bbox cut as `pbf::read` / `read_roads`. Store hit → no per-bbox cache written.
+- Fallback: store missing / stale (`manifest.json` extract names + size + mtime differ) / bbox outside → extracts as before. Startup prints which.
+- Parity `flood_api check-osm-store w s e n` (store vs extracts):
+  | bbox | store | extracts | result |
+  |---|---|---|---|
+  | 7.07,50.49,7.17,50.57 (/region test + pad) | 0.02 s | 274 s | all counts identical |
+  | 5.6,50.55,5.96,50.64 (default help zone) | 0.12 s | 433 s | all counts identical |
+  | 6.0,50.55,6.3,50.75 (DE/BE border) | 0.10 s | 486 s | roads, nodes, facilities, shelters identical; extracts keep water ways twice where extracts overlap (raw 38,937 vs 34,534 river pts); unique rivers identical (2,038) |
+- Check peak RSS 0.5–1.0 GB (extract side). Test server uses the live store via symlink `srv_out/osm_store`.
+- End-to-end (:8081, then live 02:22): new /help/zones 157 km² **0.34 s** (was ~3.5 min); new /region 160 km² 12.7 s (was 2–3 min); repeat 4.0–4.6 s, of which features 0.23 s, rest = Python scorer (start + imports + region_check). t72 bbox unchanged (1,895 cells, 49/15, 1.89 km², mean 0.13319). Next if needed: persistent Python worker.
+- 2026-10-30 (for hackathon-bc): `cells.geojson` + `pop` (people per cell) + `elev` (DEM m); types::CAVEATS + flood_tool.CAVEATS + Annex 2 limits (EMS snapshot, outside AOI = not mapped, EFAS < 500 km², 500-yr ceiling, GHS-POP residents; OBAT Belgium in flood_tool only).

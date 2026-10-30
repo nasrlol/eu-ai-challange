@@ -18,7 +18,7 @@ data under `~/hackathon/working_data/`, code under `~/hackathon/code/`.
 
 ## 1. Understanding the CEMS data
 
-> **Prompt:** "/home/nasr/hackathon/working_data/ems_be what are these vector folders? no need to open them indiviually they are large"
+> **Prompt:** "working_data/ems_be what are these vector folders? no need to open them indiviually they are large"
 
 - `ems_*` folders are **Copernicus EMS Rapid Mapping** products: EMSR517 (Germany), EMSR518 (Belgium), EMSR520 (Netherlands).
 - Folder name `EMSR518_AOI01_DEL_PRODUCT_r1_...`: activation, area of interest, map type (DEL = flood delineation, GRA = damage grading), PRODUCT = first map, MONIT01 = first monitoring update.
@@ -176,6 +176,14 @@ Discussion only. The CEMS damage grades are a July 2021 snapshot; repairs since 
 - **Live situation in a next flood:** new CEMS activations (same format, so the scripts work unchanged), national road-closure feeds (DE/BE/NL), alerts (GDACS, Meteoalarm, national warning apps).
 - **Proposed method:** use our models as the prior and update with the first live reports (e.g. one closed bridge, then recompute who is cut off): "where to look first".
 - Options offered: (A) OSM recovery check for AOI15; (B) "live update" mode in `access_model.py` (mark roads closed, recompute cut-off areas, no external data). Recommended B. Waiting for the user's choice.
+
+> **Prompt:** "is the api capable of providing a complete prediction of the flood visually in time and space?"
+
+Answer: **no**. Checked `flood_api` (outputs `risk.tif`, `features.csv`, `facilities.geojson` per bbox ≤ 3,000 km²; roads/buildings/factors still on `notes/10_todo.md`). Space: yes as a relative-risk ranking; extent/depth only as fixed EFAS scenarios (no depth raster written yet). Time: nothing is time-dependent; `interp_model.py` only fills gaps between past images (IoU 0.14). Visual: files for QGIS, no viewer. Proposed: (1) write extent/depth rasters per scenario from `flood_tool.py`; (2) "staged scenario timeline" driven by a river-flow forecast (e.g. Open-Meteo Flood API / GloFAS, unverified, external) mapping forecast return period → EFAS stage per hour; (3) hydrodynamic model as future work; (4) web map with time slider for the demo. Waiting for the user's choice.
+
+> **Prompt:** "give me a list of the data sources we have"
+
+Answered from the Data sources section plus a check of `working_data/` (sizes: EMS 948 MB, EFAS 902 MB, OBAT 11.5 GB, GHS-POP 984 MB, DEM 298 MB, OSM 2.0 GB). Noted: GHS-POP 2025 is present but unused; Open-Meteo discharge was never retrieved (daily limit); placeholder assumptions (cost, storey, m²/person, 0.3 m, evacuation thresholds) have no source.
 
 ## 10. Access danger: can help reach people? (`access_model.py`)
 
@@ -410,6 +418,79 @@ Other models (unchanged): road damage classifier median AUC 0.706 vs RP100 0.747
 
 ---
 
+## 16. Flood in time and space: timeline + viewer (`timeline.py`)
+
+> **Prompt:** "implement it we really need that"
+
+**What it does:** for any region in the study area, a time series of flood return periods drives, step by step: water depth map → roads closed → buildings flooded / cut off → evacuation levels, shown in an HTML map with a time slider.
+
+**Drivers (time input):**
+- `--peak-rp 500 --rise-h 24 --fall-h 72 --step-h 6`: **what-if hydrograph** (log T rises linearly from 2 years to the peak, then falls). Works offline; the demo default.
+- `--series file.csv`: `time, return_period`, or `time, discharge` + `--q10 --q100` (Gumbel through both). For a real gauge or official forecast.
+- `--open-meteo [lon,lat] --start --end`: GloFAS discharge via Open-Meteo, thresholds from 1984–2020 annual maxima (Gumbel, method of moments), cached in `cache/discharge/`. **Not tested:** the API refused today ("Daily API request limit exceeded"), so do not rely on it for the demo.
+
+**Space:** depth for any T = EFAS RP10/100/500 depths (DEM-checked) interpolated on log T (`risk_model.blend_T`); below RP10 the depth shrinks to 0 at T = 2 (assumption: rivers stay in their banks up to a 2-year flow); above RP500 it is held at RP500. Depth grid 0.0005° (~35 × 55 m). New flood spec `T=<return period>` in `access_model.py` (also usable in `flood_tool.py`); steps with the same T (2 significant digits) share one analysis.
+
+**Outputs (`outputs/timelines/<name>/`):** `steps.csv` (per step: T, flooded km², roads closed km, buildings flooded / cut off, people now / early / boat-air / prepare), `depth_<step>.tif`, `cells.gpkg` (evacuation cells per step), **`viewer.html`** (self-contained: Leaflet from cdnjs + OSM tiles, depth overlay, evacuation cells with reasons in popups, fire stations/hospitals, return-period chart, KPIs, "evacuate first" list, play button).
+
+**Runs:**
+- `ahr_whatif` (6.9–7.15 E, 50.45–50.58 N, peak RP500 at H+24, recedes by H+96): H+6 (T≈8) 4.5 km² flooded, 47 km roads closed, ~2,571 people "evacuate now"; peak (T≈500) 5.3 km², 61 km, ~3,612 now / ~4,267 early. Most of the extent is already reached by RP10: in a narrow valley the walls limit spreading, so higher return periods mainly add **depth**.
+- `series_test` (BE/DE border region, CSV discharge 40 → 420 → 90 m³/s, Q10 = 120, Q100 = 300): T 3.9 → 480 → 6.9; 1.8 → 2.1 km² flooded.
+- Checks: viewer JavaScript parses (esprima); peak-step depth + cells rendered and inspected (water follows the Ahr valley, cells along it).
+
+**Limits (also shown in the viewer):** this is a **staged scenario**, not hydraulics. Water does not travel downstream over time: the whole region switches stage together, from one river point. No rainfall-runoff, no flash-flood timing, no debris or bridge failure. Treat time as "when each stage is reached, if the river follows this hydrograph". A hydrodynamic model (LISFLOOD-FP) is future work.
+
+**For `flood_api`:** it can call `timeline.py` the same way it calls `score_region.py` (subprocess, then serve `viewer.html` / `steps.csv`).
+
+## 17. Human evacuation flow ("the human flood", `evac_sim.py`)
+
+> **Prompt:** "make a model and an enpdoint that based on the ppopilation density it predicts how they will travel and what roads they will use and what roads they can use. so we have the wate flood but also the human evacuation flod. simulate that. based on times of day. weather. etc etc."
+
+**Model (per region, flood, hour, weekday/weekend, weather):**
+1. Evacuees per building = occupants (GHS-POP) × share at home at that hour × compliance by category (now 0.9, early 0.6, prepare 0.15 "shadow" evacuation).
+2. Cars = evacuees × 0.85 car share / 2.5 persons per car; the rest need organised transport.
+3. Destination = nearest safe road node by travel time: dry, ≥ 500 m from any road flooded in the target flood, or a dry road leaving the region.
+4. Routes = fastest paths on the roads usable *while people leave* (`--roads-flood`). All cars are loaded onto a shortest-path tree, giving per road: cars, demand per hour over the departure window (2 h day, 3 h night), capacity left after background traffic (5 % night, 50 % weekday rush, 30 % day) and weather, load (v/c), level (free / busy / congested / overloaded), BPR delay, time to clear the queue.
+5. Time to safety per building = departure window + travel time + worst bottleneck; 95th percentile per run.
+- Speeds/capacities by class: Highway 100 km/h / 3,600 veh/h, Primary 70 / 1,500, Secondary 60 / 1,100, Local 40 / 600. Weather (capacity, speed): rain 0.92 / 0.9, heavy rain 0.8 / 0.8, fog 0.85 / 0.75, snow 0.7 / 0.6; night speed × 0.9. **All assumed** (no evacuation data to fit them); listed in every `summary.json`.
+- **Boat/air** = evacuees with no usable road route to any safe node. First version used "cut off from help" (wrong question: a cut-off valley house can still reach a dry hillside road); fixed.
+
+**Key finding: timing beats everything.** EMSR517 Ahr box (6.9–7.15 E, 50.45–50.58 N), flood T=500, 03:00:
+
+| Roads closed while leaving | Evacuees | Cars | Boat/air only | 95 % safe after |
+|---|---|---|---|---|
+| none (order before water arrives) | 5,560 | 1,886 | 14 | 3.8 h |
+| as at RP10 (order once valley roads flood) | 5,560 | 525 | 4,017 | 3.2 h |
+| as at peak (T=500) | 5,560 | 214 | 4,930 | 3.1 h |
+
+**Time of day and weather matter in dense areas.** Vesdre valley (BE, 5.55–5.95 E, 50.55–50.66 N), RP100, all roads open:
+
+| Run | Evacuees | Cars | Congested + overloaded km | 95 % safe after |
+|---|---|---|---|---|
+| 03:00 dry | 64,430 | 21,877 | 0.5 | 6.0 h |
+| 08:00 dry (rush hour) | 47,475 | 16,120 | 3.4 (worst stretch v/c 2.1) | 6.2 h |
+| 08:00 heavy rain | 47,475 | 16,120 | 5.6 (v/c 2.6) | 7.4 h |
+| 17:00 heavy rain | 44,084 | 14,968 | 5.4 | 7.0 h |
+
+Night: more people at home and slower warning, but empty roads. Rush hour: fewer evacuees but roads already half full. Heavy rain adds ~1 h. Congestion concentrates at the dense western end (preview checked); the rural Ahr box never congests.
+
+**Endpoint:** the other session (hackathon-41) asked not to add a second Python server: the Rust `flood_api` (`src/models.rs`, port 8080) already runs our scripts as CLIs. So `evac_sim.py` got a stable CLI (documented in `notes/08` "Model endpoints" as proposed `POST /evacuation`), and the Rust route is pending the user's/team's decision. `evac_sim.run(...)` is also importable.
+
+**Outputs (`outputs/evacuations/<name>/`):** `summary.json` (per run + assumptions + caveats), `roads_<HHh_weather>.gpkg` (every used stretch: cars, v/c, level, clear time), `cells_<…>.gpkg` (evacuees, cars, transport needs, boat/air, time to safety per 1 km cell), `viewer.html` (run selector; roads coloured by congestion and sized by cars; flooded roads in blue; cells shaded by evacuees; JS parse-checked; 3.4 MB after merging pieces, was 35 MB). Runs kept: `ahr_evac` (peak), `ahr_evac_none`, `ahr_evac_T10`, `vesdre_evac`.
+
+**Limits:** static assignment (fastest route chosen before congestion; no rerouting, contraflow or phased evacuation); people not at home (work/school) are not modelled; walking routes (footpaths, tracks) are not in the network, so boat/air is an upper bound; EFAS scenario floods remain upper bounds.
+
+## 18. API test campaign: Python owner
+
+> **Prompt (from coordinator session hackathon-41, on the user's behalf):** full API test of every feature across 8 sessions (`notes/13_api_tests.md`). This session = **Python owner**: only session editing `code/*.py` during the campaign; fixes Python bugs forwarded from API testers, keeps CLIs stable, logs fixes here, does not edit `flood_api/src`.
+
+- **Hosting** (asked by the user, from `notes/12_hosting.md`): `http://valencia.tail142ce3.ts.net:8080`, tailnet only, systemd `flood-api`; code there is an rsync copy (last sync ~15:45, before `/evacuation` and this afternoon's model changes). Local test server for the campaign: `localhost:8081`.
+- **Reference numbers** for CLI vs API parity: `outputs/eval/api_reference.json` (sent to hackathon-41). Test bbox `7.05,50.52,7.12,50.56` (EMSR517 AOI15, 22.1 km², 5,023 buildings); runs `ref_flood`, `ref_timeline`, `ref_evac` (do not overwrite), plus `/impact` EMSR518_AOI02 and stored roads/interp for AOI15.
+- Built-in consistency check passed: timeline peak (T=100) = flood_tool rp100 = evac_sim building counts (449 flooded, 522 cut off).
+- **Fix E1** (from /evacuation tests): `evac_sim.run` with `flood="observed"` (or `roads_flood="observed"`) on a bbox/polygon region silently returned 0 flooded / 0 evacuees. Now raises `ValueError` → CLI exit 1 + "'observed' needs a CEMS AOI name as region…", same as `flood_tool.py`. Safety net: `access_model.flood_mask` raises if the area has no observed flood. `timeline.py` only builds `T=` floods (not affected). Verified: bbox+observed → exit 1 (flood and roads_flood); `flood_tool` guard unchanged; AOI name + observed still works (EMSR517_AOI15_GRA 03h: 6,363 evacuees); reference `ref_evac` 03h_dry unchanged (1,263.49 / 427.36 / 3.25 h). CLI unchanged.
+- **Fix G4** (from /flood parity test): `flood_tool` `summary.json` flood blocks lacked building counts. Each block now also has `buildings`, `buildings_flooded`, `buildings_cut_off`, `roads_closed_km`, `road_km` (from `access_model.STATS`); existing keys unchanged. Verified `ref_flood` rp100: 5,023 / 449 / 522 / 22.94 km closed of 292.26 km (matches timeline peak); risk_ge_0.5: 1,475 / 2,682 / 59.92 km. `outputs/eval/api_reference.json` updated.
+- **B11 (diagnosed, known limit, no code change):** /flood on valencia (x86_64) gives `risk_ge_0.5` buildings_flooded 1,476 vs 1,475 here (aarch64); everything else exact. Local reruns are deterministic (identical predict_proba arrays, 1,475 twice). No building is within 1e-6 of 0.5 (nearest 0.500034 and four at 0.499847), so it is not threshold float noise. Likely one building on a raster pixel edge reads a different DEM/EFAS pixel because pyproj/numpy results differ in the last bit across CPU builds (`floor(pixel index)` sampling). **Accepted by hackathon-41** as a known limit: test tolerance ±1 (±0.1 %) for `risk>=t` building counts across platforms. Real fix would be snapping coordinates before `floor`; not done, since it shifts the reference numbers. Diagnostic one-liner sent to hackathon-41 to confirm on valencia.
+
 ## Run order
 
 Later scripts reuse earlier outputs, so after a change rerun in this order:
@@ -420,6 +501,8 @@ Later scripts reuse earlier outputs, so after a change rerun in this order:
 3. `road_model.py --rebuild`: writes `outputs/roads/`
 4. `access_model.py --flood observed rp10 rp100 rp500`: writes `outputs/access/` (danger + evacuation)
 5. `flood_tool.py --region … --flood …`: any region, writes `outputs/regions/<name>/`
+5b. `timeline.py --region … --peak-rp 500` (or `--series` / `--open-meteo`): flood in time + viewer, writes `outputs/timelines/<name>/`
+5c. `evac_sim.py --region … --flood … --roads-flood none --hours 3 8 17 --weather dry heavy_rain`: evacuation traffic + viewer, writes `outputs/evacuations/<name>/`
 6. `main.py`, `pipeline.py`, `report.py`, `eval_depth_check.py`: independent
 
 ## Open issues / ideas not done yet
@@ -448,6 +531,8 @@ Later scripts reuse earlier outputs, so after a change rerun in this order:
 | `flood_tool.py` → `outputs/regions/<name>/` | Any region + any flood: risk map, danger and evacuation tables, summary.json |
 | `evaluate.py`, `eval_depth_check.py` → `outputs/eval/` | Held-out precision checks for all models; DEM depth check |
 | `outputs/risk/model_v2.joblib` | 12-feature risk model (not yet used by the API) |
+| `timeline.py` → `outputs/timelines/<name>/` | Flood timeline: depth per step, roads, evacuation, `viewer.html` with time slider |
+| `evac_sim.py` → `outputs/evacuations/<name>/` | Human evacuation flow: who leaves, routes, congestion, time to safety, by hour/weather; `viewer.html` |
 | `outputs/`, `cache/` | Results; recomputable tables |
 | `grid_io.py`, `score_region.py` | Team API workstream: npy handoff format, scoring a region's features (`notes/08`) |
 | `~/hackathon/flood_api/` | Team Rust region API (any bbox → features → risk) |
@@ -460,9 +545,13 @@ Later scripts reuse earlier outputs, so after a change rerun in this order:
 
 ## Data sources
 
-- **Challenge data:** Copernicus EMS Rapid Mapping (EMSR517 DE, EMSR518 BE, EMSR520 NL; incl. roads, rivers, image dates, road damage grades), EFAS flood hazard (RP10/100/500), GHS-OBAT buildings, GHS-POP 2020 population.
-- **External (declare in brief and AI sheet):** Copernicus DEM GLO-30 (elevation, via AWS open data); OpenStreetMap via Geofabrik extracts (rivers, water, roads, bridges, fire stations, hospitals; ODbL, current state, not 2021); JRC global depth-damage curves (Huizinga et al. 2017).
+- **Challenge data:** Copernicus EMS Rapid Mapping (EMSR517 DE, EMSR518 BE, EMSR520 NL; incl. roads, rivers, image dates, road damage grades), EFAS flood hazard (RP10/100/500), GHS-OBAT buildings, GHS-POP 2020 population (GHS-POP 2025 present, unused).
+- **External (declare in brief and AI sheet):** Copernicus DEM GLO-30 (elevation, via AWS open data); OpenStreetMap via Geofabrik extracts (rivers, water, roads, bridges, fire stations, hospitals; ODbL, current state, not 2021); JRC global depth-damage curves (Huizinga et al. 2017); optional GloFAS river discharge via Open-Meteo (`timeline.py --open-meteo`); viewer basemap tiles from OpenStreetMap.
 
 ## AI use (for Annex 7)
 
 All code in `code/` (except `preprocess.py`) was written by Claude Code (Opus) from the prompts above. Checks done on the results: running every script, comparing outputs with the source data (CRS, flooded area, observed road km), testing models on areas they never saw (leave-one-area-out), comparing with simple baselines, and rendering the PDF to check it visually. Each of these checks caught real bugs, listed per step. Numbers are model estimates; assumptions and limits are listed per step and under Open issues.
+
+## 19. API follow-up (cems-efas-72, 2026-10-29 evening)
+- `score_region.py`: reads `grid.npy` (grid_io) or CSV; writes `risk.csv` as x, y, risk only; new `risk_check.json` = % cells outside training 1–99 pct per feature (ranges cached in `outputs/risk/feature_ranges.json`, from `cache/risk_features_osm.pkl`), nearest training AOI (`study_region.gpkg` layer aois) + its held-out AUC (`risk/regions.csv`).
+- `access_model.write`: danger/evacuation CSVs keep lon/lat at 4 decimals (were rounded to 0.1 / 0.01 with the other columns). `flood_tool` top_cells likewise (only `people` rounded). Counts unchanged (ref bbox rp100 449 / 522).

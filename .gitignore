@@ -11,3 +11,11 @@ flood_api/out/
 __pycache__/
 flood_api/target/
 .env
+
+# frontend: separate repo (github.com/sistahoppet/AI-Challenge), cloned here
+AI-Challenge/
+# policy advisor API: separate repo (github.com/nasrlol/flood-policy-advisor)
+policy_api/
+# challenge annexes + team documents (not public): local only
+docs/
+*.zip

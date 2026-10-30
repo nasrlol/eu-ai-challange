@@ -1,0 +1,10 @@
+[Unit]
+Description=flood_api: pull branch live, build, restart (CD)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=nasr
+Environment=REPO_DIR=/home/nasr/hackathon
+ExecStart=/bin/sh /home/nasr/hackathon/flood_api/deploy/deploy.sh

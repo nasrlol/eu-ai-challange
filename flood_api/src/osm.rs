@@ -7,6 +7,19 @@ use std::{path::Path, time::Duration};
 
 #[path = "pbf.rs"]
 mod pbf;
+#[path = "osm_store.rs"]
+pub mod store;
+pub use pbf::Road;
+/// The extracts directly, bypassing the store (for check-osm-store)
+pub use pbf::{read as pbf_read, read_roads as pbf_read_roads};
+
+/// Roads and shelters for the bbox: from the OSM store if it covers it, else the extracts
+pub fn read_roads(dir: &Path, w: f64, s: f64, e: f64, n: f64) -> Result<Option<(Vec<Road>, Vec<Facility>)>> {
+    if let Some(r) = store::get().map(|st| st.roads(w, s, e, n)).transpose()?.flatten() {
+        return Ok(Some(r));
+    }
+    pbf::read_roads(dir, w, s, e, n)
+}
 
 const MIRRORS: [&str; 3] = [
     "https://overpass-api.de/api/interpreter",
@@ -14,6 +27,19 @@ const MIRRORS: [&str; 3] = [
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ];
 const USER_AGENT: &str = "eu-ai-challenge-flood-api/0.1";
+/// Bump when the extracted OSM content changes, so old per-bbox caches are not reused
+const CACHE_VERSION: u32 = 2;
+
+/// Places people can be brought to. `shelter`: OSM-mapped shelters and assembly points.
+/// `candidate_shelter`: schools and sports halls, often used as emergency shelters (an assumption:
+/// OSM does not say which ones are designated, nor their capacity).
+pub fn shelter_kind(k: &str, v: &str) -> Option<&'static str> {
+    match (k, v) {
+        ("social_facility", "shelter") | ("emergency", "assembly_point") => Some("shelter"),
+        ("amenity", "school") | ("leisure", "sports_hall" | "sports_centre") | ("building", "sports_hall") => Some("candidate_shelter"),
+        _ => None,
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Facility {
@@ -32,24 +58,32 @@ pub struct Osm {
     pub facilities: Vec<Facility>,
 }
 
-/// OSM data for the bbox: local Geofabrik extracts in `pbf_dir` if any cover it, else Overpass.
-/// The parsed result is cached on disk by bbox.
+/// OSM data for the bbox: the OSM store if it covers it (fast, nothing cached per bbox), else the
+/// local Geofabrik extracts in `pbf_dir`, else Overpass; those two are cached on disk by bbox.
 pub fn fetch(w: f64, s: f64, e: f64, n: f64, pbf_dir: &Path, cache_dir: &Path) -> Result<Osm> {
+    if let Some(osm) = store::get().map(|st| st.osm(w, s, e, n)).transpose()?.flatten() {
+        return Ok(dedup_facilities(osm));
+    }
     let bb = format!("{s:.4},{w:.4},{n:.4},{e:.4}");
-    let cache = cache_dir.join(format!("osm_{}.json", bb.replace(',', "_")));
+    let cache = cache_dir.join(format!("osm_v{CACHE_VERSION}_{}.json", bb.replace(',', "_")));
     if cache.exists() {
         return Ok(serde_json::from_str(&std::fs::read_to_string(&cache)?)?);
     }
-    let mut osm = match pbf_dir.is_dir().then(|| pbf::read(pbf_dir, w, s, e, n)).transpose()?.flatten() {
+    let osm = match pbf_dir.is_dir().then(|| pbf::read(pbf_dir, w, s, e, n)).transpose()?.flatten() {
         Some(osm) => osm,
         None => parse(&serde_json::from_str(&overpass(&bb)?)?)?,
     };
-    // extracts overlap at borders: drop facilities found twice
-    let mut seen = std::collections::HashSet::new();
-    osm.facilities.retain(|f| seen.insert((f.kind.clone(), (f.lon * 1e5) as i64, (f.lat * 1e5) as i64)));
+    let osm = dedup_facilities(osm);
     std::fs::create_dir_all(cache_dir)?;
     std::fs::write(&cache, serde_json::to_string(&osm)?)?;
     Ok(osm)
+}
+
+/// Extracts overlap at borders: drop facilities found twice
+fn dedup_facilities(mut osm: Osm) -> Osm {
+    let mut seen = std::collections::HashSet::new();
+    osm.facilities.retain(|f| seen.insert((f.kind.clone(), (f.lon * 1e5) as i64, (f.lat * 1e5) as i64)));
+    osm
 }
 
 fn overpass(bb: &str) -> Result<String> {
@@ -62,7 +96,11 @@ fn overpass(bb: &str) -> Result<String> {
  relation["waterway"="riverbank"]({bb}););
 out geom;
 (nwr["amenity"~"^(fire_station|hospital|police)$"]({bb});
- nwr["emergency"="ambulance_station"]({bb}););
+ nwr["emergency"~"^(ambulance_station|assembly_point)$"]({bb});
+ nwr["social_facility"="shelter"]({bb});
+ nwr["amenity"="school"]({bb});
+ nwr["leisure"~"^(sports_hall|sports_centre)$"]({bb});
+ nwr["building"="sports_hall"]({bb}););
 out center tags;"#
         );
         let client = reqwest::blocking::Client::builder()
@@ -120,7 +158,7 @@ fn parse(v: &Value) -> Result<Osm> {
         let kind = match (tag("amenity"), tag("emergency")) {
             (a @ ("fire_station" | "hospital" | "police"), _) => Some(a),
             (_, "ambulance_station") => Some("ambulance_station"),
-            _ => None,
+            _ => tags.as_object().into_iter().flatten().find_map(|(k, v)| shelter_kind(k, v.as_str()?)),
         };
         if let Some(kind) = kind {
             let (lon, lat) = match el["type"].as_str() {

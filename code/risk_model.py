@@ -49,6 +49,19 @@ def dem_tiles(w, s, e, n):
     return paths
 
 
+def blend_T(T, d10, d100, d500):
+    """Depth for return period T from the RP10/100/500 depths, interpolated on log(T). Below RP10 the
+    RP10 depth shrinks to zero at T = 2 (rivers assumed to stay in their banks up to a 2-year flow);
+    above RP500 the RP500 depth is kept (no extrapolation)."""
+    if T <= 2:
+        return np.zeros_like(d10)
+    for (lo, d_lo), (hi, d_hi) in [((2, 0 * d10), (10, d10)), ((10, d10), (100, d100)), ((100, d100), (500, d500))]:
+        if T <= hi:
+            w = (np.log(T) - np.log(lo)) / (np.log(hi) - np.log(lo))
+            return ((1 - w) * d_lo + w * d_hi).astype("float32")
+    return d500
+
+
 def sample_in(geom, n, rng, exclude=None):
     """n uniform random points inside geom (EPSG:3035), part by part so tiny polygons still get hits."""
     parts = [p for p in getattr(geom, "geoms", [geom]) if p.area > 0]
@@ -149,6 +162,10 @@ class Area:
             self._base, self._ground = minimum_filter(self.dem, size=5), minimum_filter(self.dem, size=3)
         above = self.at(self._ground, self.tf, lon, lat) - self.at(self._base, self.tf, lon, lat)
         return np.where(d > 0, np.maximum(d - above, 0), 0).astype("float32")
+
+    def depth_T(self, T, xy, dem_check=True):
+        """Depth for any return period T, blending the EFAS maps (see blend_T)."""
+        return blend_T(T, *(self.depth(rp, xy, dem_check) for rp in ("rp10", "rp100", "rp500")))
 
     @staticmethod
     def at(arr, tf, lon, lat):
