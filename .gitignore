@@ -16,3 +16,6 @@ flood_api/target/
 AI-Challenge/
 # policy advisor API: separate repo (github.com/nasrlol/flood-policy-advisor)
 policy_api/
+# challenge annexes + team documents (not public): local only
+docs/
+*.zip
