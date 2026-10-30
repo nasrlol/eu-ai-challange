@@ -71,3 +71,11 @@ New projects (cover in the brief as next steps unless time allows):
 - [ ] Fake-news detection + counter-messaging (sanctions = policy, not software)
 - [ ] Permanent crisis team in government (governance proposal for the brief)
 - [ ] AI layer (notes/09), skipped for now by the user
+
+## 7. Frontend questions (2026-10-30, answers page https://claude.ai/artifact/XAyaJhGy4513b1Y4kuAafA)
+- Found: `/region` "corrupt deflate stream" = EFAS sparse tiles (0-byte, e.g. #41946 near 5.3 E 50.1 N); `raster.rs` must treat 0-byte tiles as nodata (~30 min). No file damaged.
+- Risk vs 2021 extent (held-out, 18 AOIs, 790k cells, 1.15 % flooded): ≥0.3 flags 22.8 % → 4.3 % precision / 84.5 % recall; ≥0.5 13.4 % → 6.6 % / 77.3 %; ≥0.7 7.3 % → 10.3 % / 65.5 %.
+- `/timeline` open_meteo July 2021 works (Ahr, 5.8 s): daily GloFAS, peak 14 Jul 260 m³/s, T 7000 (→ RP500 cap).
+- AOI06_DEL = study-hull NE corner: its bbox 4 % outside; centre box 0 %.
+- [ ] /timeline `files.cells_geojson` (100 m cells, depth per step) ~1.5 h · [ ] raster.rs sparse tiles ~30 min · [ ] /files/region/study_region.geojson ~10 min · [ ] /region `aoi` ~1 h · [ ] `reuse` flag ~1 h · [ ] /buildings, /places ~2–3 h each · [ ] series with discharge + q10/q100 ~30 min
+- Demo: 429 = nginx 10/min/IP on model runs, 504 = 300 s proxy timeout → preload with ?async=1, load via /files.
