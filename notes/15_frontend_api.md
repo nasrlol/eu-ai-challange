@@ -83,3 +83,7 @@ Frontend: `AI-Challenge/`, a separate git repo (origin sistahoppet/AI-Challenge)
 - Sandbox: 3 rain days + 30-day rain + month → 60-day synthetic series → peak flow → T → people/buildings (EFAS blended on log T, = `blend_T`); map uses `planFromRp` (same rule as Alert)
 - Now: forecast API past_days 60 + 16 days → model; GloFAS median forecast alongside
 - Limits: GloFAS is the target (a model, not gauges); EFAS-type rivers only; 1 point per area; blend gives shallow water over the whole RP10 extent for T 2–10 (people count jumps)
+
+## 2026-10-30: policy advice (commit db7a80c on `frontend-perf`, pushed, live on :5500)
+- Live model tab, section 9: the user picks Claude (key field, sessionStorage, or localStorage if "remember"), local model, or rules → `js/policy.js` → policy API :8082 (`?policy=` override).
+- `api.js` keeps the last result of each run in `A.res` (`keepRes`), plus a `policyInit()` hook in `apiInit`. Tested in deno with a stub DOM; **not checked in a real browser**.

@@ -39,3 +39,6 @@
 - Live pre-built for the default study bbox 5.6,50.55,5.96,50.64: help zone `zone_5600_50550_5960_50640`, `/region` `app_5600_50550_5960_50640`.
 - 2026-10-30 (user request): `~/frontend` is now a git clone of sistahoppet/AI-Challenge, branch `frontend-perf` (commit 017e2f8). Update: push from laptop → `ssh valencia 'cd ~/frontend && git pull'` (static, no restart). Old rsync copy kept in `~/frontend.rsync-bak`.
 - 2026-10-30 02:22: live redeployed with the OSM store (`flood_api/out/osm_store`, 802 MB; rebuild `./target/release/flood_api build-osm-store` after updating extracts, ~2.5 min, otherwise startup says "stale" and falls back to extracts). Test server shares it via symlink.
+
+## Policy advisor API (2026-10-30, user request)
+- `http://valencia.tail142ce3.ts.net:8082`, systemd `policy-api`; ollama `qwen3:8b` on 127.0.0.1:11434. Details: [16_policy_api.md](16_policy_api.md).
