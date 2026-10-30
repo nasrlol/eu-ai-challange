@@ -5,6 +5,8 @@ Layers in cache/osm_study_region.gpkg (EPSG:3035):
   water       natural=water polygons (lakes, reservoirs, river surfaces)
   roads       drivable highways with road_class and bridge flag
   facilities  fire stations and hospitals as points
+  places      town / village / hamlet / suburb names (points; population when tagged)   } built on first use
+  shelters    shelters, assembly points, schools, sports halls (polygons where mapped)   } (build_extra)
 """
 import argparse
 import geopandas as gpd, pandas as pd, shapely
@@ -21,6 +23,12 @@ HIGHWAY_CLASS = {
     **{k: "Local road" for k in ("tertiary", "tertiary_link", "unclassified", "residential", "living_street", "service")},
 }
 AMENITIES = ("fire_station", "hospital")
+PLACES = ("city", "town", "village", "suburb", "hamlet")
+# same tags as flood_api osm.rs shelter_kind: shelter = mapped as one; candidate_shelter = often used as one (assumption)
+SHELTER_TAGS = {("social_facility", "shelter"): "shelter", ("emergency", "assembly_point"): "shelter",
+                ("amenity", "school"): "candidate_shelter", ("leisure", "sports_hall"): "candidate_shelter",
+                ("leisure", "sports_centre"): "candidate_shelter", ("building", "sports_hall"): "candidate_shelter"}
+EXTRA = ("places", "shelters")
 
 
 def _sql_in(values):
@@ -63,15 +71,60 @@ def build():
         print(f"  {name}: {len(g):,}")
 
 
+def _tag(df, key):
+    """Tag value from a column when GDAL has one, else from other_tags."""
+    col = df[key] if key in df else None
+    from_other = df.other_tags.fillna("").str.extract(f'"{key}"=>"([^"]+)"')[0]
+    return from_other if col is None else col.fillna(from_other)
+
+
+def build_extra():
+    """Add the `places` and `shelters` layers to the cache (one pass over the extracts, a few minutes)."""
+    import pyogrio
+    from region import hull
+    w, s, e, n = gpd.GeoSeries([hull()], crs=3035).to_crs(4326).total_bounds + [-PAD_DEG, -PAD_DEG, PAD_DEG, PAD_DEG]
+    like = " OR ".join(f"other_tags LIKE '%\"{k}\"=>\"{v}\"%'" for k, v in SHELTER_TAGS)
+    places, shelters = [], []
+    for pbf in sorted((DATA / "osm").glob("*.osm.pbf")):
+        print(f"  {pbf.name}", flush=True)
+        pts = _read(pbf, "points", f"place IN {_sql_in(PLACES)} OR {like}", (w, s, e, n))
+        pl = pts[pts.place.isin(PLACES) & pts.name.notna()].copy()
+        pl["population"] = pd.to_numeric(_tag(pl, "population").str.replace(r"[^0-9]", "", regex=True), errors="coerce")
+        places.append(pl[["osm_id", "name", "place", "population", "geometry"]])
+        polys = _read(pbf, "multipolygons", f"amenity = 'school' OR leisure IN ('sports_hall', 'sports_centre') OR "
+                                            f"building = 'sports_hall' OR {like}", (w, s, e, n))
+        polys["osm_id"] = polys.osm_id.fillna(polys.osm_way_id)
+        for df in (pts, polys):
+            kind = pd.Series(None, index=df.index, dtype=object)
+            tag = pd.Series(None, index=df.index, dtype=object)
+            for (k, v), kd in SHELTER_TAGS.items():
+                hit = (_tag(df, k) == v) & kind.isna()
+                kind[hit], tag[hit] = kd, v
+            df = df.assign(kind=kind, tag=tag)
+            shelters.append(df[df.kind.notna()][["osm_id", "name", "kind", "tag", "geometry"]])
+    for name, frames in (("places", places), ("shelters", shelters)):
+        g = gpd.GeoDataFrame(pd.concat(frames, ignore_index=True).drop_duplicates("osm_id"), geometry="geometry", crs=4326).to_crs(3035)
+        g.to_file(FILE, layer=name, driver="GPKG")
+        print(f"  {name}: {len(g):,}")
+    pyogrio.list_layers(FILE)  # fail here, not later, if the file was not written
+
+
 def layer(name, region):
     """One layer clipped to the bounding box of `region` (EPSG:3035), buffered by 2 km."""
     if not FILE.exists():
         build()
+    if name in EXTRA:
+        import pyogrio
+        if name not in pyogrio.list_layers(FILE)[:, 0]:
+            build_extra()
     x0, y0, x1, y1 = region.buffer(2000).bounds
     return gpd.read_file(FILE, layer=name, bbox=(x0, y0, x1, y1), engine="pyogrio")
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.parse_args()
-    build()
+    p.add_argument("--extra", action="store_true", help="only (re)build the places and shelters layers")
+    if p.parse_args().extra:
+        build_extra()
+    else:
+        build()
