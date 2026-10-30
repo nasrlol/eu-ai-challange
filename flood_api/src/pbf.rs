@@ -7,7 +7,7 @@ use osmpbf::{BlobDecode, BlobReader, Element, ElementReader, RelMemberType};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-fn facility_kind<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> (Option<&'static str>, Option<String>) {
+pub(super) fn facility_kind<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> (Option<&'static str>, Option<String>) {
     let (mut kind, mut name) = (None, None);
     for (k, v) in tags {
         match (k, v) {
@@ -22,16 +22,16 @@ fn facility_kind<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> (Option<
     (kind, name)
 }
 
-fn is_river(tags: &[(&str, &str)]) -> bool {
+pub(super) fn is_river(tags: &[(&str, &str)]) -> bool {
     tags.iter().any(|&(k, v)| k == "waterway" && matches!(v, "river" | "stream" | "canal"))
 }
 
-fn is_water(tags: &[(&str, &str)]) -> bool {
+pub(super) fn is_water(tags: &[(&str, &str)]) -> bool {
     tags.iter().any(|&(k, v)| (k == "natural" && matches!(v, "water" | "wetland")) || (k == "waterway" && v == "riverbank"))
 }
 
 /// Extracts whose header bbox overlaps the region
-fn extracts(dir: &Path, w: f64, s: f64, e: f64, n: f64) -> Result<Vec<PathBuf>> {
+pub(super) fn extracts(dir: &Path, w: f64, s: f64, e: f64, n: f64) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
@@ -155,6 +155,26 @@ const HIGHWAYS: [&str; 22] = ["motorway", "trunk", "primary", "secondary", "tert
     "primary_link", "secondary_link", "tertiary_link", "unclassified", "residential", "living_street", "service",
     "road", "track", "path", "footway", "cycleway", "pedestrian", "steps", "bridleway"];
 
+/// (highway, name, oneway) of a routable way, None if its highway type is not in HIGHWAYS
+pub(super) fn road_tags<'a>(tags: impl Iterator<Item = (&'a str, &'a str)>) -> Option<(&'static str, Option<String>, i8)> {
+    let (mut highway, mut name, mut oneway, mut roundabout) = (None, None, 0, false);
+    for (k, v) in tags {
+        match (k, v) {
+            ("highway", h) => highway = HIGHWAYS.iter().find(|&&x| x == h).copied(),
+            ("name", n) => name = Some(n.to_owned()),
+            ("oneway", "yes" | "1" | "true") => oneway = 1,
+            ("oneway", "-1") => oneway = -1,
+            ("junction", "roundabout") => roundabout = true,
+            _ => {}
+        }
+    }
+    let highway = highway?;
+    if oneway == 0 && (roundabout || highway == "motorway") {
+        oneway = 1;
+    }
+    Some((highway, name, oneway))
+}
+
 /// Roads and shelters (see `shelter_kind`) in the bbox from the extracts that cover it; None if no extract does.
 pub fn read_roads(dir: &Path, w: f64, s: f64, e: f64, n: f64) -> Result<Option<(Vec<Road>, Vec<Facility>)>> {
     let files = extracts(dir, w, s, e, n)?;
@@ -193,21 +213,7 @@ pub fn read_roads(dir: &Path, w: f64, s: f64, e: f64, n: f64) -> Result<Option<(
                 }
                 return;
             }
-            let (mut highway, mut name, mut oneway, mut roundabout) = (None, None, 0, false);
-            for (k, v) in way.tags() {
-                match (k, v) {
-                    ("highway", h) => highway = HIGHWAYS.iter().find(|&&x| x == h).copied(),
-                    ("name", n) => name = Some(n.to_owned()),
-                    ("oneway", "yes" | "1" | "true") => oneway = 1,
-                    ("oneway", "-1") => oneway = -1,
-                    ("junction", "roundabout") => roundabout = true,
-                    _ => {}
-                }
-            }
-            let Some(highway) = highway else { return };
-            if oneway == 0 && (roundabout || highway == "motorway") {
-                oneway = 1;
-            }
+            let Some((highway, name, oneway)) = road_tags(way.tags()) else { return };
             let mut runs: Vec<Vec<(i64, f64, f64)>> = vec![vec![]];
             for id in way.refs() {
                 match coords.get(&id) {

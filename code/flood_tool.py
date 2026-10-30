@@ -25,6 +25,11 @@ CAVEATS = [
     "Population is GHS-POP 2020 (1 km) split over GHS-OBAT buildings.",
     "Help is routed by road distance, not travel time; debris and damaged bridges are not modelled.",
     "Evacuation levels are fixed rules (depth, single-storey, cut off, people counts), not an optimisation; depth is only known for EFAS floods.",
+    "CEMS maps (observed flood, training labels) are a snapshot when the satellite passed, not the peak; outside the mapped AOIs 'not flooded' means 'not mapped'.",
+    "EFAS leaves out rivers with an upstream catchment under 500 km² (small streams, flash floods).",
+    "The 1-in-500-year map is the ceiling of the scenarios; July 2021 went beyond it in places.",
+    "GHS-OBAT undercounts buildings in Belgium, so Belgian building and people counts are low.",
+    "GHS-POP counts residents only (no commuters or visitors).",
 ]
 
 
@@ -91,7 +96,7 @@ if __name__ == "__main__":
                                            people_prepare=round(float(g2.prepare_people.sum())),
                                            first_cells=g2[g2.evac_priority > 0].sort_values("evac_priority").head(5)[
                                                ["evac_priority", "evac_level", "lat", "lon", "evac_reasons"]].to_dict("records")),
-                           top_cells=g2.head(5)[["overall", "lat", "lon", "people", "reasons"]].round(1).to_dict("records"))
+                           top_cells=g2.head(5)[["overall", "lat", "lon", "people", "reasons"]].round({"people": 1}).to_dict("records"))
                 for spec, g2 in gdf.groupby("flood")},
         sources=dict(challenge=["Copernicus EMS", "EFAS RP10/100/500", "GHS-OBAT", "GHS-POP"],
                      external=["Copernicus DEM GLO-30", "OpenStreetMap (Geofabrik)"]),

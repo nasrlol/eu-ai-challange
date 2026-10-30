@@ -1,34 +1,13 @@
-//! Data structures of the region API: what comes in, what goes to the Python scorer, what goes out.
-//! Mirrors code/grid_io.py (npy row layout), risk_model.py (FEATURES, 0.5 threshold) and
-//! access_model.py (factor thresholds, overall level). Change those and this file together.
+//! Data structures of the /region response, the npy handoff to the Python scorer and the
+//! explained danger per cell. Mirrors code/grid_io.py (npy row layout), risk_model.py (FEATURES,
+//! 0.5 threshold) and access_model.py (factor thresholds, overall level). Change those and this
+//! file together.
+use crate::features::{FEATURES, GRID_M};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::{collections::BTreeMap, io::Write, path::PathBuf};
 
-// ---------- Request ----------
-
-#[derive(Deserialize)]
-pub struct RegionRequest {
-    /// Output folder name, e.g. an alert id: letters, digits, _ or -
-    pub name: String,
-    pub area: Area,
-    /// EFAS return periods to report; empty = all three
-    #[serde(default)]
-    pub scenarios: Vec<Scenario>,
-    #[serde(default)]
-    pub options: Options,
-}
-
-/// Region in lon/lat (EPSG:4326)
-#[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum Area {
-    /// [west, south, east, north] in degrees
-    Bbox { bbox: [f64; 4] },
-    /// GeoJSON Polygon geometry; outer ring only
-    Polygon { geometry: Value },
-    /// One of our training AOIs, e.g. "EMSR517_AOI15" (boundary from processed/ems_clean.gpkg)
-    Aoi { code: String },
-}
+// ---------- Scenarios ----------
 
 #[derive(Deserialize, Serialize, Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -43,98 +22,47 @@ impl Scenario {
     pub fn years(self) -> u32 {
         match self { Scenario::Rp10 => 10, Scenario::Rp100 => 100, Scenario::Rp500 => 500 }
     }
+    /// Column in FEATURES holding this scenario's EFAS depth
+    pub fn feature(self) -> usize {
+        match self { Scenario::Rp10 => 5, Scenario::Rp100 => 6, Scenario::Rp500 => 7 }
+    }
 }
 
-#[derive(Deserialize)]
-#[serde(default)]
-pub struct Options {
-    /// Run the sklearn model (code/risk/model.joblib) on the grid
-    pub score: bool,
-    /// Fetch OSM emergency facilities and compute distances
-    pub facilities: bool,
-    /// Number of priority cells returned
-    pub top_n: usize,
+// ---------- Grid (Rust -> Python), grid_io.GRID_DTYPE ----------
+
+/// numpy descr of one row: x, y (EPSG:3035 cell centre, f8) then FEATURES (f4), little-endian
+pub fn npy_descr() -> String {
+    let cols: Vec<String> = ["x", "y"].iter().map(|c| format!("('{c}', '<f8')"))
+        .chain(FEATURES.iter().map(|f| format!("('{f}', '<f4')"))).collect();
+    format!("[{}]", cols.join(", "))
 }
 
-impl Default for Options {
-    fn default() -> Self { Options { score: true, facilities: true, top_n: 20 } }
+/// Write cells as a .npy structured array (format 1.0): grid_io.load reads it without parsing
+pub fn write_npy(path: &std::path::Path, xy: &[(f64, f64)], feats: &[[f32; 8]]) -> std::io::Result<()> {
+    let mut head = format!("{{'descr': {}, 'fortran_order': False, 'shape': ({},), }}", npy_descr(), xy.len());
+    // magic (6) + version (2) + length (2) + header incl. newline: total a multiple of 64
+    head.push_str(&" ".repeat(63 - (10 + head.len()) % 64));
+    head.push('\n');
+    let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
+    w.write_all(b"\x93NUMPY\x01\x00")?;
+    w.write_all(&(head.len() as u16).to_le_bytes())?;
+    w.write_all(head.as_bytes())?;
+    for (&(x, y), f) in xy.iter().zip(feats) {
+        w.write_all(&x.to_le_bytes())?;
+        w.write_all(&y.to_le_bytes())?;
+        for v in f {
+            w.write_all(&v.to_le_bytes())?;
+        }
+    }
+    w.flush()
 }
-
-// ---------- Grid (Rust -> Python) ----------
-
-pub const GRID_M: f64 = 100.0;
-pub const N_FEATURES: usize = 8;
-pub const FEATURES: [&str; N_FEATURES] = ["elev", "slope", "relief", "hand", "dist_river", "rp10", "rp100", "rp500"];
-/// numpy descr for grid_io.GRID_DTYPE; must match `Cell` field for field
-pub const NPY_DESCR: &str = "[('x', '<f8'), ('y', '<f8'), ('elev', '<f4'), ('slope', '<f4'), ('relief', '<f4'), \
-('hand', '<f4'), ('dist_river', '<f4'), ('rp10', '<f4'), ('rp100', '<f4'), ('rp500', '<f4')]";
-
-/// One 100 m cell as the model sees it: exactly one npy row (48 bytes, little-endian, no padding).
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct Cell {
-    /// Cell centre, EPSG:3035 metres
-    pub x: f64,
-    pub y: f64,
-    /// In FEATURES order; EFAS depths are 0 where dry
-    pub features: [f32; N_FEATURES],
-}
-
-/// Per-cell data the model does not use, kept parallel to `Grid::cells` (same index).
-#[derive(Clone, Copy, Debug, Serialize)]
-pub struct CellContext {
-    pub lon: f64,
-    pub lat: f64,
-    /// GHS-POP 2020, people per km² (1 km source, so rough at 100 m)
-    pub pop_density: f32,
-    /// Straight-line metres to nearest OSM facility; NaN if none found
-    pub dist_fire_station_m: f32,
-    pub dist_hospital_m: f32,
-}
-
-impl CellContext {
-    pub fn people(&self) -> f32 { self.pop_density * (GRID_M * GRID_M / 1e6) as f32 }
-}
-
-pub struct Grid {
-    pub cells: Vec<Cell>,
-    pub context: Vec<CellContext>,
-    pub facilities: Vec<Facility>,
-    /// River vertices used for hand / dist_river; low counts mean OSM rivers are sparse
-    pub n_river_pts: usize,
-}
-
-impl Grid {
-    pub fn area_km2(&self) -> f64 { self.cells.len() as f64 * GRID_M * GRID_M / 1e6 }
-}
-
-// ---------- Facilities (OSM) ----------
-
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum FacilityKind {
-    FireStation,
-    Hospital,
-    Police,
-    AmbulanceStation,
-}
-
-#[derive(Serialize, Clone, Debug)]
-pub struct Facility {
-    pub kind: FacilityKind,
-    pub name: Option<String>,
-    pub lon: f64,
-    pub lat: f64,
-}
-
-// ---------- Scores (Python -> Rust) ----------
 
 /// Same threshold as risk_model.py / road_model.py
 pub const HIGH_RISK: f32 = 0.5;
 
-/// Model output, same order as `Grid::cells`. Relative ranking, not a calibrated probability.
-pub struct Scores {
-    pub risk: Vec<f32>,
+/// People per 100 m cell from GHS-POP people per km² (1 km source, so rough at 100 m)
+pub fn people(pop_density: f32) -> f32 {
+    pop_density * (GRID_M * GRID_M / 1e6) as f32
 }
 
 // ---------- Explained danger (access_model.py logic) ----------
@@ -149,6 +77,7 @@ pub enum Level {
 }
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[serde(rename_all = "snake_case")]
 pub enum Overall {
     Low,
     Elevated,
@@ -176,12 +105,16 @@ pub enum FactorKind {
     CutOffPct,
     BridgePct,
     Detour,
+    HelpKm,
     People,
     SingleStoreyPct,
     Likelihood,
 }
 
 impl FactorKind {
+    pub const ALL: [FactorKind; 8] = [FactorKind::FloodedPct, FactorKind::CutOffPct, FactorKind::BridgePct, FactorKind::Detour,
+                                      FactorKind::HelpKm, FactorKind::People, FactorKind::SingleStoreyPct, FactorKind::Likelihood];
+
     /// (label, medium, high) as in access_model.FACTORS
     pub fn spec(self) -> (&'static str, f32, f32) {
         match self {
@@ -189,6 +122,7 @@ impl FactorKind {
             FactorKind::CutOffPct => ("Cut off by road", 10.0, 50.0),
             FactorKind::BridgePct => ("Depends on bridges", 10.0, 50.0),
             FactorKind::Detour => ("Long detour", 1.3, 2.0),
+            FactorKind::HelpKm => ("Far from help", 8.0, 15.0),
             FactorKind::People => ("People affected", 100.0, 500.0),
             FactorKind::SingleStoreyPct => ("No upper floor", 20.0, 50.0),
             FactorKind::Likelihood => ("Flood-prone terrain", 0.3, 0.5),
@@ -204,10 +138,18 @@ impl FactorKind {
 #[derive(Serialize, Clone, Debug)]
 pub struct Factor {
     pub kind: FactorKind,
-    pub value: f32,
+    pub label: &'static str,
+    /// null when not available
+    pub value: Option<f32>,
     pub level: Level,
-    /// Plain-language reason, e.g. "96% of buildings unreachable from outside"
+    /// Plain-language reason, e.g. "relative terrain risk 0.62 (a ranking, not a probability)"
     pub reason: String,
+}
+
+impl Factor {
+    pub fn new(kind: FactorKind, value: f32, reason: String) -> Self {
+        Factor { kind, label: kind.spec().0, value: (!value.is_nan()).then_some(value), level: kind.level(value), reason }
+    }
 }
 
 // ---------- Response ----------
@@ -217,12 +159,18 @@ pub struct RegionResponse {
     pub name: String,
     pub cells: usize,
     pub area_km2: f64,
+    /// River vertices used for hand / dist_river; low counts mean OSM rivers are sparse
     pub river_points: usize,
-    pub facilities: std::collections::BTreeMap<FacilityKind, usize>,
+    /// OSM facilities inside the region, by kind
+    pub facilities: BTreeMap<String, usize>,
+    /// In the 0.02° pad around it (still used for distances)
+    pub facilities_nearby_outside: BTreeMap<String, usize>,
     pub risk: Option<RiskSummary>,
+    /// How far the region is from the training data (code/score_region.py); null without scoring
+    pub region_check: Option<Value>,
     pub files: Files,
-    pub sources: Vec<Source>,
-    /// Limits to show next to any number, e.g. "OSM rivers differ from CEMS training hydrography"
+    pub sources: &'static [Source],
+    /// Limits to show next to any number
     pub caveats: Vec<&'static str>,
 }
 
@@ -231,7 +179,8 @@ pub struct RiskSummary {
     pub mean: f32,
     pub high_risk_km2: f64,
     pub people_in_high_risk_approx: f32,
-    pub expected_people_flooded_approx: f32,
+    /// Σ risk × people: for comparing regions only (risk is a ranking, not a probability)
+    pub risk_weighted_people_index: f32,
     pub by_scenario: Vec<ScenarioSummary>,
     /// Ranked by risk × people
     pub priority_cells: Vec<PriorityCell>,
@@ -240,28 +189,39 @@ pub struct RiskSummary {
 #[derive(Serialize)]
 pub struct ScenarioSummary {
     pub scenario: Scenario,
-    /// Cells with EFAS depth >= 0.3 m (road-impassable threshold)
+    /// Cells with EFAS depth > 0
     pub flooded_km2: f64,
+    /// Cells with EFAS depth >= 0.3 m (road-impassable threshold, access_model.py)
+    pub deep_km2: f64,
     pub people_approx: f32,
+    pub max_depth_m: f32,
 }
 
 #[derive(Serialize)]
 pub struct PriorityCell {
     pub rank: usize,
-    #[serde(flatten)]
-    pub context: CellContext,
+    pub lon: f64,
+    pub lat: f64,
     pub risk: f32,
     pub people: f32,
+    /// Straight-line metres to the nearest OSM facility (not travel distance); null if none found
+    pub dist_fire_station_m: Option<f32>,
+    pub dist_hospital_m: Option<f32>,
     pub overall: Overall,
     pub factors: Vec<Factor>,
 }
 
 #[derive(Serialize, Default)]
 pub struct Files {
-    /// npy grid in grid_io layout
-    pub grid: Option<std::path::PathBuf>,
-    pub risk_tif: Option<std::path::PathBuf>,
-    pub facilities_geojson: Option<std::path::PathBuf>,
+    /// Every cell: x, y, lon, lat, FEATURES, pop_density, straight-line facility distances
+    pub features: PathBuf,
+    /// Same cells in grid_io npy layout (the scorer's input)
+    pub grid: PathBuf,
+    pub facilities: PathBuf,
+    pub risk: Option<PathBuf>,
+    pub risk_tif: Option<PathBuf>,
+    /// Map layer: cells with risk >= 0.2 or wet in any EFAS scenario, 100 m squares in lon/lat
+    pub cells: Option<PathBuf>,
 }
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -273,26 +233,48 @@ pub enum Origin {
     External,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Copy, Debug)]
 pub struct Source {
     pub name: &'static str,
+    pub used_for: &'static str,
     pub origin: Origin,
     pub licence: &'static str,
 }
 
-#[derive(Serialize)]
-pub struct ApiError {
-    pub error: String,
-}
+pub const SOURCES: &[Source] = &[
+    Source { name: "EFAS flood hazard maps RP10/100/500", used_for: "rp10, rp100, rp500, by_scenario", origin: Origin::Challenge, licence: "Copernicus EMS" },
+    Source { name: "GHS-POP 2020 (30″)", used_for: "people", origin: Origin::Challenge, licence: "CC BY 4.0" },
+    Source { name: "CEMS Rapid Mapping EMSR517/518/520", used_for: "training labels of the risk model", origin: Origin::Challenge, licence: "Copernicus EMS" },
+    Source { name: "Copernicus DEM GLO-30", used_for: "elev, slope, relief, hand", origin: Origin::External, licence: "Copernicus DEM licence (free use)" },
+    Source { name: "OpenStreetMap (Geofabrik extracts)", used_for: "rivers, water, fire stations, hospitals", origin: Origin::External, licence: "ODbL" },
+];
+
+pub const CAVEATS: &[&str] = &[
+    "risk is a relative ranking from terrain and EFAS hazard, not a calibrated probability",
+    "people are approximate: GHS-POP is 1 km, spread evenly over 100 m cells",
+    "facility distances are straight-line, not travel distance; real road distances are longer",
+    "OSM is today's map, not July 2021; OSM rivers differ from the CEMS hydrography",
+    "factors that need roads or buildings (cut off, bridges, detour, flooded buildings, single storey) are not computed here; use POST /flood",
+    "the model learned from CEMS maps: a snapshot when the satellite passed, not the flood peak; outside the mapped AOIs \"not flooded\" means \"not mapped\"",
+    "EFAS leaves out rivers with an upstream catchment under 500 km², so small streams and flash floods are missing",
+    "the 1-in-500-year map is the ceiling of the scenarios; July 2021 went beyond it in places",
+    "GHS-POP counts residents only (no commuters or visitors)",
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn cell_matches_npy_row() {
-        assert_eq!(std::mem::size_of::<Cell>(), 16 + 4 * N_FEATURES);
-        assert_eq!(NPY_DESCR.matches("'<f4'").count(), N_FEATURES);
+    fn npy_header_is_aligned() {
+        let p = std::env::temp_dir().join("flood_api_types_test.npy");
+        write_npy(&p, &[(1.0, 2.0), (3.0, 4.0)], &[[0.0; 8], [1.0; 8]]).unwrap();
+        let b = std::fs::read(&p).unwrap();
+        let head = u16::from_le_bytes([b[8], b[9]]) as usize;
+        assert_eq!((10 + head) % 64, 0);
+        assert_eq!(b.len(), 10 + head + 2 * (16 + 4 * FEATURES.len()));
+        assert_eq!(npy_descr().matches("'<f4'").count(), FEATURES.len());
+        std::fs::remove_file(p).ok();
     }
 
     #[test]
@@ -305,9 +287,9 @@ mod tests {
     }
 
     #[test]
-    fn area_is_tagged() {
-        let a: RegionRequest = serde_json::from_str(r#"{"name":"t","area":{"type":"bbox","bbox":[6.9,50.4,7.2,50.6]}}"#).unwrap();
-        assert!(matches!(a.area, Area::Bbox { .. }));
-        assert!(a.options.score && a.scenarios.is_empty());
+    fn missing_value_is_not_available() {
+        let f = Factor::new(FactorKind::CutOffPct, f32::NAN, "x".into());
+        assert_eq!((f.level, f.value), (Level::NotAvailable, None));
+        assert_eq!(FactorKind::HelpKm.level(16.0), Level::High);
     }
 }

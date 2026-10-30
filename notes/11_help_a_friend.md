@@ -43,3 +43,5 @@ A person with a disability in a risk zone asks for help → 3 closest volunteer 
 - `/help-requests/{id}/shelter` defaults to the request's own scenario.
 - Re-POST `/help/zones` = upsert (helpers and requests kept).
 - `POST /help/zones`: name must be `[A-Za-z0-9_-]+` (empty name was accepted before); bbox goes through `region_check` (inverted / zero / > 3000 km² / outside study hull → 422 in < 5 ms) BEFORE the 30 s – 2 min graph build.
+
+- 2026-10-29 (cems-efas-72): `DELETE /helpers/{id}` (an accepted request goes back to `open`, returns `requests_reopened`) and `DELETE /help-requests/{id}` (frees its helper unless assigned elsewhere): delete on demand, not only after 72 h. CORS allows DELETE.

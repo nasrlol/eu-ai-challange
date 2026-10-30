@@ -364,14 +364,48 @@ fn close(h: &Help, id: i64) -> Result<Value> {
     Ok(json!({"id": id, "status": "done"}))
 }
 
+/// Remove a helper now (instead of waiting for RETENTION_H); a request it had accepted goes back to open
+fn delete_helper(h: &Help, id: i64) -> Result<Value> {
+    let mut db = h.db.lock().unwrap();
+    let tx = db.transaction()?;
+    let reopened = tx.execute("UPDATE help_requests SET status = 'open' WHERE status = 'assigned' AND id IN
+                               (SELECT request_id FROM assignments WHERE helper_id = ?1 AND accepted_at IS NOT NULL)", [id])?;
+    if tx.execute("DELETE FROM helpers WHERE id = ?1", [id])? == 0 {
+        return Err(NotFound(format!("no helper {id}")).into());
+    }
+    tx.commit()?;
+    Ok(json!({"id": id, "deleted": true, "requests_reopened": reopened}))
+}
+
+/// Remove a request and its offers now; its helper is freed unless still assigned elsewhere
+fn delete_request(h: &Help, id: i64) -> Result<Value> {
+    let mut db = h.db.lock().unwrap();
+    let tx = db.transaction()?;
+    let helper: Option<i64> = tx.query_row("SELECT helper_id FROM assignments WHERE request_id = ?1 AND accepted_at IS NOT NULL",
+                                           [id], |r| r.get(0)).optional()?;
+    if tx.execute("DELETE FROM help_requests WHERE id = ?1", [id])? == 0 {
+        return Err(NotFound(format!("no request {id}")).into());
+    }
+    if let Some(hid) = helper {
+        tx.execute("UPDATE helpers SET available = 1, updated_at = ?2 WHERE id = ?1
+                    AND NOT EXISTS (SELECT 1 FROM assignments a JOIN help_requests r ON r.id = a.request_id
+                                    WHERE a.helper_id = ?1 AND a.accepted_at IS NOT NULL AND r.status = 'assigned')",
+                   params![hid, now()])?;
+    }
+    tx.commit()?;
+    Ok(json!({"id": id, "deleted": true}))
+}
+
 pub fn router(help: Help) -> Router {
     Router::new()
         .route("/help/zones", post(|State(h): State<Help>, JsonBody(r): JsonBody<ZoneReq>| blocking(move || create_zone(&h, r))))
         .route("/helpers", post(|State(h): State<Help>, JsonBody(r): JsonBody<HelperReq>| blocking(move || create_helper(&h, r))))
         .route("/helpers/:id", patch(|State(h): State<Help>, PathArg(id): PathArg<i64>, JsonBody(r): JsonBody<HelperUpdate>|
-            blocking(move || update_helper(&h, id, r))))
+            blocking(move || update_helper(&h, id, r)))
+            .delete(|State(h): State<Help>, PathArg(id): PathArg<i64>| blocking(move || delete_helper(&h, id))))
         .route("/help-requests", post(|State(h): State<Help>, JsonBody(r): JsonBody<HelpReq>| blocking(move || create_request(&h, r))))
-        .route("/help-requests/:id", get(|State(h): State<Help>, PathArg(id): PathArg<i64>| blocking(move || get_request(&h, id))))
+        .route("/help-requests/:id", get(|State(h): State<Help>, PathArg(id): PathArg<i64>| blocking(move || get_request(&h, id)))
+            .delete(|State(h): State<Help>, PathArg(id): PathArg<i64>| blocking(move || delete_request(&h, id))))
         .route("/help-requests/:id/accept", post(|State(h): State<Help>, PathArg(id): PathArg<i64>, JsonBody(r): JsonBody<AcceptReq>|
             blocking(move || accept(&h, id, r))))
         .route("/help/zones/:zone/shelters", get(|State(h): State<Help>, PathArg(z): PathArg<String>, QueryArgs(q): QueryArgs<ShelterQuery>|

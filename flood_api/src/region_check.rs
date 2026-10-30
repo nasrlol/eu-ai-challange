@@ -29,6 +29,17 @@ fn hull(gpkg: &Path) -> Result<Polygon> {
     Ok(Polygon::new(LineString::from(pts), vec![]))
 }
 
+/// Study hull bbox in lon/lat [w, s, e, n]
+pub fn hull_bbox(gpkg: &Path) -> Result<[f64; 4]> {
+    let laea = Laea::new();
+    let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+    for c in hull(gpkg)?.exterior().coords() {
+        let (lon, lat) = laea.inv(c.x, c.y);
+        b = [b[0].min(lon), b[1].min(lat), b[2].max(lon), b[3].max(lat)];
+    }
+    Ok(b)
+}
+
 /// Region ring (lon/lat) → area in km² if it may be built, else an error explaining why
 pub fn check(ring: &[(f64, f64)], gpkg: &Path) -> Result<f64> {
     if ring.len() < 4 || ring.iter().any(|&(x, y)| !x.is_finite() || !y.is_finite() || x.abs() > 180.0 || y.abs() > 90.0) {

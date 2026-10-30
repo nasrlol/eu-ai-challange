@@ -14,3 +14,5 @@ flood_api/target/
 
 # frontend: separate repo (github.com/sistahoppet/AI-Challenge), cloned here
 AI-Challenge/
+# policy advisor API: separate repo (github.com/nasrlol/flood-policy-advisor)
+policy_api/

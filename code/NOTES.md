@@ -18,7 +18,7 @@ data under `~/hackathon/working_data/`, code under `~/hackathon/code/`.
 
 ## 1. Understanding the CEMS data
 
-> **Prompt:** "/home/nasr/hackathon/working_data/ems_be what are these vector folders? no need to open them indiviually they are large"
+> **Prompt:** "working_data/ems_be what are these vector folders? no need to open them indiviually they are large"
 
 - `ems_*` folders are **Copernicus EMS Rapid Mapping** products: EMSR517 (Germany), EMSR518 (Belgium), EMSR520 (Netherlands).
 - Folder name `EMSR518_AOI01_DEL_PRODUCT_r1_...`: activation, area of interest, map type (DEL = flood delineation, GRA = damage grading), PRODUCT = first map, MONIT01 = first monitoring update.
@@ -551,3 +551,7 @@ Later scripts reuse earlier outputs, so after a change rerun in this order:
 ## AI use (for Annex 7)
 
 All code in `code/` (except `preprocess.py`) was written by Claude Code (Opus) from the prompts above. Checks done on the results: running every script, comparing outputs with the source data (CRS, flooded area, observed road km), testing models on areas they never saw (leave-one-area-out), comparing with simple baselines, and rendering the PDF to check it visually. Each of these checks caught real bugs, listed per step. Numbers are model estimates; assumptions and limits are listed per step and under Open issues.
+
+## 19. API follow-up (cems-efas-72, 2026-10-29 evening)
+- `score_region.py`: reads `grid.npy` (grid_io) or CSV; writes `risk.csv` as x, y, risk only; new `risk_check.json` = % cells outside training 1–99 pct per feature (ranges cached in `outputs/risk/feature_ranges.json`, from `cache/risk_features_osm.pkl`), nearest training AOI (`study_region.gpkg` layer aois) + its held-out AUC (`risk/regions.csv`).
+- `access_model.write`: danger/evacuation CSVs keep lon/lat at 4 decimals (were rounded to 0.1 / 0.01 with the other columns). `flood_tool` top_cells likewise (only `people` rounded). Counts unchanged (ref bbox rp100 449 / 522).

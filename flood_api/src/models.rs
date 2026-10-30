@@ -49,7 +49,13 @@ impl Models {
 
     fn region_arg(&self, r: &Region, name: &str) -> Result<String> {
         Ok(match r {
-            Region::Bbox { bbox: [w, s, e, n] } => format!("{w},{s},{e},{n}"),
+            Region::Bbox { bbox: [w, s, e, n] } => {
+                // same shape rule as /region; Python would silently reorder an inverted bbox
+                if !([w, s, e, n].iter().all(|v| v.is_finite()) && w < e && s < n && w.abs() <= 180.0 && e.abs() <= 180.0 && s.abs() <= 90.0 && n.abs() <= 90.0) {
+                    bail!("bbox must be [west, south, east, north] in degrees with west < east and south < north");
+                }
+                format!("{w},{s},{e},{n}")
+            }
             Region::Aoi { aoi } => {
                 self.cems_folder(aoi)?; // 422 if malformed, 404 if unknown, before Python
                 aoi.clone()

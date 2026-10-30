@@ -319,10 +319,11 @@ def write(gdf, folder):
     for spec, g in gdf.groupby("flood"):
         g = evacuation(g.reset_index(drop=True))  # priority ranked across all areas of this flood
         g.to_file(folder / "access_danger.gpkg", layer=spec, driver="GPKG")
-        g[g.overall != "Low"].drop(columns="geometry").round(2).to_csv(folder / f"danger_{spec}.csv", index=False)
+        keep_ll = lambda d, n: d.round({c: n for c in d.columns if c not in ("lon", "lat")})  # lon/lat stay at 4 decimals (~10 m)
+        keep_ll(g[g.overall != "Low"].drop(columns="geometry"), 2).to_csv(folder / f"danger_{spec}.csv", index=False)
         cols = ["evac_priority", "evac_level", "area", "lat", "lon", "population", "must_people", "early_people",
                 "air_people", "prepare_people", "evac_reasons", "overall", "reasons"]
-        g[g.evac_level != "None"].sort_values("evac_priority")[cols].round(1).to_csv(folder / f"evacuation_{spec}.csv", index=False)
+        keep_ll(g[g.evac_level != "None"].sort_values("evac_priority")[cols], 1).to_csv(folder / f"evacuation_{spec}.csv", index=False)
 
 
 if __name__ == "__main__":
