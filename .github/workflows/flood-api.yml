@@ -1,0 +1,74 @@
+# CI on every PR and push. CD: a green main is pushed to branch `live`; valencia pulls `live` every minute,
+# builds flood_api and restarts it (flood_api/deploy/), then `verify` checks the public API runs this commit.
+name: flood_api CI/CD
+
+on:
+  pull_request:
+  push:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: flood_api
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        working-directory: flood_api
+        run: cargo build --release --locked
+        env:
+          GIT_SHA: ${{ github.sha }}
+
+      - name: Tests
+        working-directory: flood_api
+        run: cargo test --release --locked
+
+      - name: Python compiles
+        run: python -m py_compile code/*.py
+
+      - name: Smoke test (server starts, light routes answer)
+        env:
+          FLOOD_ADDR: 127.0.0.1:8090
+          FLOOD_OUT: ${{ runner.temp }}/out
+          FLOOD_DATA: ${{ runner.temp }}/data
+        run: |
+          flood_api/target/release/flood_api > server.log 2>&1 &
+          for i in $(seq 40); do curl -sf -o /dev/null http://$FLOOD_ADDR/health && break; sleep 0.5; done
+          curl -sf http://$FLOOD_ADDR/health || { cat server.log; exit 1; }; echo
+          [ "$(curl -sf http://$FLOOD_ADDR/version)" = "$GITHUB_SHA" ] || { echo "::error::/version is not $GITHUB_SHA"; exit 1; }
+          curl -sf -o /dev/null http://$FLOOD_ADDR/models || { echo "::error::/models failed"; cat server.log; exit 1; }
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Move branch live to this commit
+        run: git push --force origin HEAD:refs/heads/live
+
+  verify:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait until the public API runs this commit (pull every minute + cargo build)
+        run: |
+          for i in $(seq 45); do
+            v=$(curl -s https://dev.nsrddyn.com/api/version || true)
+            [ "$v" = "$GITHUB_SHA" ] && { echo "live: $v"; exit 0; }
+            sleep 20
+          done
+          echo "::error::dev.nsrddyn.com/api still runs '$v' after 15 min (journalctl -u flood-api-deploy on valencia)"; exit 1

@@ -65,3 +65,12 @@
 - Smoke after switch: :5500 200, dev.nsrddyn.com 200, /api/health ok, flood-api + policy-api active.
 - 2026-10-30 cleanup: challenge annexes, team .docx/.pptx and drive-download zips untracked → local `docs/` (gitignored with `*.zip`); still in git history. Team notebook → `starter_notebook/how_to_get_started_ems.ipynb`.
 - Frontend CD (after AI-Challenge#1 merges): `~/frontend` on branch `live`, systemd `frontend-deploy.timer` pulls every minute; no manual `git pull` needed.
+
+## CI/CD for the APIs (2026-10-30, user request)
+| API | Workflow | CD unit (valencia) | Verify |
+|---|---|---|---|
+| flood_api (this repo) | `.github/workflows/flood-api.yml`: cargo build + test, `py_compile code/*.py`, smoke `/health` `/version` `/models` | `flood_api/deploy/flood-api-deploy.{service,timer}` | `dev.nsrddyn.com/api/version` = commit |
+| policy_api | `policy_api/.github/workflows/ci.yml`: cargo build + test, smoke `/health` `/version` `/policies` | `policy_api/deploy/policy-api-deploy.{service,timer}` | `dev.nsrddyn.com/policy/version` = commit |
+- Same pattern as the frontend: green `main` → branch `live` (GITHUB_TOKEN), valencia pulls `live` every minute, `GIT_SHA=<commit> cargo build --release`, `sudo -n systemctl restart`. Done marker `.git/deployed`; failed build → old binary keeps running, retried next minute. Dirty checkout → refuses (needs `git checkout -- .` once on `~/hackathon`).
+- New route `GET /version` in both APIs (`option_env!("GIT_SHA")`, `dev` otherwise).
+- Install (once, after merge): `sudo cp <deploy>/*-deploy.{service,timer} /etc/systemd/system/ && sudo systemctl enable --now <name>-deploy.timer`.

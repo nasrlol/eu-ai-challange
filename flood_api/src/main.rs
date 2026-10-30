@@ -443,6 +443,8 @@ async fn main() -> Result<()> {
     let models = models::Models { python: cfg.python, code, data: cfg.data };
     let jobs = jobs::Jobs::default();
     let app = Router::new().route("/health", get(|| async { "ok" }))
+        // git commit of this build (deploy sets GIT_SHA), checked by CI after a deploy
+        .route("/version", get(|| async { option_env!("GIT_SHA").unwrap_or("dev") }))
         .route("/region", post(move |extract::JsonBody(req): extract::JsonBody<RegionRequest>| {
             let outputs = outputs.clone();
             blocking(move || run(req).map(|v| models::public(v, &outputs)))
