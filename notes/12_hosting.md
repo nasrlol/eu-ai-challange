@@ -74,3 +74,4 @@
 - Same pattern as the frontend: green `main` → branch `live` (GITHUB_TOKEN), valencia pulls `live` every minute, `GIT_SHA=<commit> cargo build --release`, `sudo -n systemctl restart`. Done marker `.git/deployed`; failed build → old binary keeps running, retried next minute. Dirty checkout → refuses (needs `git checkout -- .` once on `~/hackathon`).
 - New route `GET /version` in both APIs (`option_env!("GIT_SHA")`, `dev` otherwise).
 - Install (once, after merge): `sudo cp <deploy>/*-deploy.{service,timer} /etc/systemd/system/ && sudo systemctl enable --now <name>-deploy.timer`.
+- PRs: nasrlol/eu-ai-challange#1 (also merges api-help-shelters-models into main), nasrlol/flood-policy-advisor#1. CI green on both (tests 4 + 3, smoke OK). Install timers after merge.
