@@ -64,3 +64,4 @@
 - Update: push from laptop → `ssh valencia 'cd <dir> && git pull'` (+ cargo build / restart for Rust). Code = branch; only `notes/` on valencia is older (diff left, not overwritten).
 - Smoke after switch: :5500 200, dev.nsrddyn.com 200, /api/health ok, flood-api + policy-api active.
 - 2026-10-30 cleanup: challenge annexes, team .docx/.pptx and drive-download zips untracked → local `docs/` (gitignored with `*.zip`); still in git history. Team notebook → `starter_notebook/how_to_get_started_ems.ipynb`.
+- Frontend CD (after AI-Challenge#1 merges): `~/frontend` on branch `live`, systemd `frontend-deploy.timer` pulls every minute; no manual `git pull` needed.
