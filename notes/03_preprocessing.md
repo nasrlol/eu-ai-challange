@@ -1,6 +1,6 @@
 # Preprocessing: `preprocess.py`
 
-Run: `.venv/bin/python code/preprocess.py [--data working_data] [--out processed/ems_clean.gpkg]` (~6 s)
+Run: `.venv/bin/python models/preprocess.py [--data working_data] [--out processed/ems_clean.gpkg]` (~6 s)
 
 ## What it does
 1. Scans `ems_*` folders and parses the product names. Keeps the newest version per stage.

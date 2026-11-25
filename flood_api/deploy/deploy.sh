@@ -3,7 +3,7 @@
 # rebuild flood_api and restart it. Run by flood-api-deploy.timer every minute. A failed build keeps the old
 # binary running and is retried on the next run.
 set -eu
-cd "${REPO_DIR:-$HOME/hackathon}"
+cd "${REPO_DIR:-$HOME/fari-flood-simulator/hackathon}"
 git fetch -q origin live 2>/dev/null || exit 0          # no live branch yet
 new=$(git rev-parse FETCH_HEAD)
 [ "$(cat .git/deployed 2>/dev/null)" = "$new" ] && exit 0

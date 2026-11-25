@@ -3,8 +3,8 @@
 European AI Challenge 2026. Working log of everything done with Claude Code,
 including the exact prompts used (for the AI sheet, Annex 7). Last updated 29 Oct 2026.
 
-**Setup:** local environment (Gentoo Linux, aarch64), Python venv at `~/hackathon/.venv`,
-data under `~/hackathon/working_data/`, code under `~/hackathon/code/`.
+**Setup:** local environment (Gentoo Linux, aarch64), Python venv at `~/fari-flood-simulator/hackathon/.venv`,
+data under `~/fari-flood-simulator/hackathon/working_data/`, models under `~/fari-flood-simulator/hackathon/models/`.
 
 **Earlier work (before this log, not created here):** research notes in `~/hackathon/notes/`
 (01 datasets, 02 EMS AOIs, 03 preprocessing, 04 modelling plan, 05 external data, 06 rescue APIs,
@@ -535,12 +535,12 @@ Later scripts reuse earlier outputs, so after a change rerun in this order:
 | `evac_sim.py` → `outputs/evacuations/<name>/` | Human evacuation flow: who leaves, routes, congestion, time to safety, by hour/weather; `viewer.html` |
 | `outputs/`, `cache/` | Results; recomputable tables |
 | `grid_io.py`, `score_region.py` | Team API workstream: npy handoff format, scoring a region's features (`notes/08`) |
-| `~/hackathon/flood_api/` | Team Rust region API (any bbox → features → risk) |
-| `~/hackathon/working_data/osm/` | Geofabrik OSM extracts (API workstream) |
+| `~/fari-flood-simulator/hackathon/flood_api/` | Team Rust region API (any bbox → features → risk) |
+| `~/fari-flood-simulator/hackathon/working_data/osm/` | Geofabrik OSM extracts (API workstream) |
 | `preprocess.py` | Earlier work (not from this log) |
 | `NOTES.md` | This log |
-| `~/hackathon/notes/` | Earlier research notes (datasets, plans, external data, rescue APIs) |
-| `~/hackathon/working_data/dem/` | Downloaded Copernicus DEM tiles |
+| `~/fari-flood-simulator/hackathon/notes/` | Earlier research notes (datasets, plans, external data, rescue APIs) |
+| `~/fari-flood-simulator/hackathon/working_data/dem/` | Downloaded Copernicus DEM tiles |
 | `~/.local/bin/qgis`, `~/.local/bin/micromamba` | QGIS launcher, conda client |
 
 ## Data sources

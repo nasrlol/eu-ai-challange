@@ -6,5 +6,5 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=nasr
-Environment=REPO_DIR=/home/nasr/hackathon
-ExecStart=/bin/sh /home/nasr/hackathon/flood_api/deploy/deploy.sh
+Environment=REPO_DIR=/home/nasr/fari-flood-simulator/hackathon
+ExecStart=/bin/sh /home/nasr/fari-flood-simulator/hackathon/flood_api/deploy/deploy.sh

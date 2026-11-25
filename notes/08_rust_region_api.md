@@ -4,7 +4,7 @@ Goal: input = region with a flood alert (bbox / polygon, lon/lat) → fetch data
 
 Hosted copy: see [12_hosting.md](12_hosting.md) (valencia, systemd `flood-api`, update steps).
 
-## Model contract (from `code/`)
+## Model contract (from `models/`)
 | Model | Features | Grid |
 |---|---|---|
 | `risk_model.py` | `elev, slope, relief, hand, dist_river, rp10, rp100, rp500` | 100 m cell centres, EPSG:3035, permanent water excluded |
@@ -17,7 +17,7 @@ Feature recipe (copy exactly):
 - hand: elev − river_z, where river_z = 5 px min filter sampled at river vertices (densified 50 m, snapped to 25 m).
 - dist_river: metres to the nearest river vertex.
 - EFAS: depth > 0, else 0. Sampling: floor of the pixel index.
-- Model: `code/outputs/risk/model.joblib` (sklearn) → Rust computes features, Python scores.
+- Model: `models/outputs/risk/model.joblib` (sklearn) → Rust computes features, Python scores.
 
 ## Environment
 - cargo 1.98 installed, crates.io reachable. **No GDAL/PROJ**, so pure Rust: `tiff`, `proj4rs`, `geo`, `rstar`, `axum`, `reqwest`.
@@ -41,7 +41,7 @@ Feature recipe (copy exactly):
 - Extras for allocation: population per cell, distance to fire station / hospital (OSM).
 - Overpass is flaky (406 without User-Agent, 502). Retry mirrors and cache to disk.
 
-## Handoff format: `code/grid_io.py` (no JSON)
+## Handoff format: `models/grid_io.py` (no JSON)
 - `.npy` structured array, one row per cell: `x, y` (EPSG:3035, f8) + `FEATURES` (f4), little-endian.
 - Python: `grid_io.load(path)` / `from_bytes(body)` → DataFrame ready for `model.predict_proba(df[FEATURES])`.
 - Rust: write the npy header (descr is in the module docstring) + raw rows. No crate needed.
@@ -62,9 +62,9 @@ Feature recipe (copy exactly):
 - Factors needing roads/OBAT (cut_off, bridge, detour, single_storey) are `NotAvailable` until the API computes them.
 
 ## Built so far (flood_api/)
-- Run: `cd flood_api && cargo build --release && ./target/release/flood_api` → `http://127.0.0.1:8080` (`FLOOD_ADDR`, `FLOOD_DATA`, `FLOOD_OUT`, `FLOOD_PYTHON`, `FLOOD_SCORER` override defaults).
+- Run: `cd flood_api && cargo build --release && FLOOD_DATA=... FLOOD_OUT=... FLOOD_PYTHON=... FLOOD_SCORER=... ./target/release/flood_api` → `http://127.0.0.1:8080` (`FLOOD_ADDR` defaults to `127.0.0.1:8080`; the four folder/path env vars are required at startup).
 - `POST /region {"name", "bbox":[w,s,e,n] | "polygon":<GeoJSON>, "score":true}` (current CSV version; `types.rs` request not wired yet).
-- Output `flood_api/out/<name>/`: `features.csv` (x, y, lon, lat, 8 FEATURES, pop_density, dist_fire_station_m, dist_hospital_m), `facilities.geojson`, `risk.csv` + `risk.tif` (via `code/score_region.py`).
+- Output `flood_api/out/<name>/`: `features.csv` (x, y, lon, lat, 8 FEATURES, pop_density, dist_fire_station_m, dist_hospital_m), `facilities.geojson`, `risk.csv` + `risk.tif` (via `models/score_region.py`).
 - Response: cells, km², facility counts, mean risk, high-risk km², people in high-risk (approx), top 20 cells by risk × people.
 - Modules: `raster.rs` (tiled GeoTIFF windows, min filter), `features.rs` (grid + features, LAEA test vs pyproj < 1 cm), `osm.rs` + `pbf.rs`.
 - Limit 3000 km² per request.
@@ -78,7 +78,7 @@ Feature recipe (copy exactly):
 | Feature | API vs Python | Why |
 |---|---|---|
 | elev, slope, relief | median diff 0, corr ≥ 0.96 | same recipe |
-| rp10/100/500 | API = raw EFAS exactly; Python differs on 4.7 % of cells | **bug in risk_model.py**: fractional `from_bounds` window → data read rounded, transform not → EFAS shifted ≤ 1 px (~90 m). **Fixed** (whole-pixel window, retrained; code/NOTES.md after step 13) |
+| rp10/100/500 | API = raw EFAS exactly; Python differs on 4.7 % of cells | **bug in risk_model.py**: fractional `from_bounds` window → data read rounded, transform not → EFAS shifted ≤ 1 px (~90 m). **Fixed** (whole-pixel window, retrained; models/NOTES.md after step 13) |
 | hand, dist_river | corr 0.84 / 0.07; dist median 242 m (OSM) vs 768 m (CEMS) | OSM has denser streams than CEMS hydrography  **Closed**: model retrained on OSM rivers (`RIVERS = "osm"`), same source as the API; held-out AUC 0.923 vs 0.922 |
 - AUC vs observed flood: API features 0.962, Python (CEMS rivers) 0.973 → OSM rivers cost ~0.01 AUC. (Model trained incl. AOI15, so both optimistic.)
 - Test request: boundary from `processed/` (PRODUCT ∪ MONIT01) is larger than the PRODUCT AOI used by risk_model; compare only inside the PRODUCT AOI.
@@ -92,17 +92,17 @@ Region = `{"type":"bbox","bbox":[w,s,e,n]}` | `{"type":"aoi","aoi":"EMSR517_AOI1
 | `POST /timeline {name, region, driver}` | timeline | `driver.type` = `whatif {peak_rp, rise_h, fall_h, step_h}` / `open_meteo {point?, start, end}` / `series {steps:[{time, return_period}]}` → `steps.csv` as JSON |
 | `POST /impact {aoi, cost_eur_m2, max_depth_m}` · `GET /impact` | pipeline (damage €, displaced) | runs `pipeline.py --json` (new flag) · `report/flood_summary.csv` |
 | `GET /roads/{aoi}` · `GET /interp/{aoi}` | road_model, interp_model | stored outputs, filtered by AOI prefix |
-| `POST /evacuation {name, region, flood, roads_flood, hours, weekend, weather}` | evac_sim (human evacuation flow) | `python3 code/evac_sim.py --region <w,s,e,n or AOI> --flood <rp100/T=500/…> [--roads-flood none\|T=10\|…] [--hours 3 8 17] [--weekend] [--weather dry rain heavy_rain fog snow] --name <name>` → `code/outputs/evacuations/<name>/summary.json` (+ `roads_<HHh_weather>.gpkg`, `cells_<…>.gpkg`, `viewer.html`). Exit code ≠ 0 + message on bad region/weather. ~5 s small bbox, ~1 min dense 450 km². API validates flood (`rp*`/`T=`/`observed`), roads_flood (+`none`), hours 0–23, weather ∈ dry/rain/heavy_rain/fog/snow; returns summary.json; listed in `/models`. |
-- Python results land in `code/outputs/` (not `FLOOD_OUT`). Flood specs are whitelisted (no file paths).
+| `POST /evacuation {name, region, flood, roads_flood, hours, weekend, weather}` | evac_sim (human evacuation flow) | `python3 models/evac_sim.py --region <w,s,e,n or AOI> --flood <rp100/T=500/…> [--roads-flood none\|T=10\|…] [--hours 3 8 17] [--weekend] [--weather dry rain heavy_rain fog snow] --name <name>` → `models/outputs/evacuations/<name>/summary.json` (+ `roads_<HHh_weather>.gpkg`, `cells_<…>.gpkg`, `viewer.html`). Exit code ≠ 0 + message on bad region/weather. ~5 s small bbox, ~1 min dense 450 km². API validates flood (`rp*`/`T=`/`observed`), roads_flood (+`none`), hours 0–23, weather ∈ dry/rain/heavy_rain/fog/snow; returns summary.json; listed in `/models`. |
+- Python results land in `models/outputs/` (not `FLOOD_OUT`). Flood specs are whitelisted (no file paths).
 - Tested: small bbox in AOI15 /flood + /timeline ~2 s; `/impact` EMSR518_AOI02 = report CSV (38 bldgs, €3.25 M). Big regions take minutes (synchronous).
 - AOI paths (`/roads/{aoi}`, `/interp/{aoi}`): must match `EMSR\d{3}_AOI\d{2}(_DEL|_GRA)?` → else 422; valid but no results → 404. Match = exact or `aoi_…` (no loose prefixes).
-- `GET /files/{path}`: read-only, serves files under `code/outputs/` only (canonicalised; `..`/symlinks outside → 404); folder → JSON listing. Content-type by extension (html, json, csv, tif, gpkg, pdf, png).
-- All model responses (`/models`, `/flood`, `/timeline`, `/impact`, `/evacuation`, `/roads`, `/interp`) rewrite absolute paths under `code/outputs/` to `/files/…` URLs. `/region` (writes to `FLOOD_OUT`) not yet.
+- `GET /files/{path}`: read-only, serves files under `models/outputs/` only (canonicalised; `..`/symlinks outside → 404); folder → JSON listing. Content-type by extension (html, json, csv, tif, gpkg, pdf, png).
+- All model responses (`/models`, `/flood`, `/timeline`, `/impact`, `/evacuation`, `/roads`, `/interp`) rewrite absolute paths under `models/outputs/` to `/files/…` URLs. `/region` (writes to `FLOOD_OUT`) not yet.
 - `/flood` files: + `danger.{flood}` and `evacuation.{flood}` CSV URLs, `summary`.
 - `NotFound` error type (main.rs) → 404; other errors stay 422.
 - `/region` validation (`src/region_check.rs`) runs BEFORE OSM/raster work, 422 in < 5 ms: inverted / zero-area bbox, < 0.01 km², > 3000 km², > 1 % outside the study hull (same `study_region.gpkg` + rule as flood_tool). Polygon may be a geometry or a Feature; other types → 422.
 - `/region` facility counts: `facilities` = inside the region only; `facilities_nearby_outside` = in the 0.02° pad (still used for distances). geojson features carry `inside`.
-- `/region` outputs moved from `FLOOD_OUT/<name>` to `code/outputs/api_region/<name>`, returned as `/files/…` URLs (FLOOD_OUT keeps cache + help.sqlite).
+- `/region` outputs moved from `FLOOD_OUT/<name>` to `models/outputs/api_region/<name>`, returned as `/files/…` URLs (FLOOD_OUT keeps cache + help.sqlite).
 - Errors (all JSON `{"error"}`): 400 unparseable JSON · 404 unknown AOI / zone / helper / request · 409 state conflict (helper busy, request already assigned/done) · 422 everything else. axum rejections (body, query, path) wrapped by `extract::{JsonBody, QueryArgs, PathArg}` in main.rs.
 - Python failures → 422 with only the last stderr line (no traceback).
 - AOI regions (`/flood`, `/timeline`, `/evacuation`) and `/impact`: AOI checked in Rust first, needs `_DEL`/`_GRA` (else 422), unknown → 404.
@@ -143,7 +143,7 @@ Region = `{"type":"bbox","bbox":[w,s,e,n]}` | `{"type":"aoi","aoi":"EMSR517_AOI1
 - `/region`: `region.type = "aoi"` → outline of the AOI's largest part from `study_region.gpkg` layer `aois` (`region_check::aoi_ring`, WKB Polygon/MultiPolygon parser `outer_rings` + unit test); suffix optional when unique. Cells get `id` = `"<x>_<y>"` (EPSG:3035 centre).
 - `/timeline`: `files.cells_geojson` (timeline.py `region_cells`: same 100 m grid as features.rs `build`, origin = bounds of the region / AOI largest part, OSM water excluded, depth per step from the DEM-checked depth grid, wet cells only, top-level `steps`). `series` driver: steps with `discharge` + `q10`/`q100` → Gumbel T.
 - `src/reuse.rs` (layer inside jobs): POST /region /flood /timeline /evacuation /layers stored on 200 under `FLOOD_OUT/reuse/<route>/<name>.json` with the request (minus `reuse`); `"reuse": true` + identical body → stored answer + `"reused": true`, header `x-reused: 1`.
-- `POST /layers {name, region}` → `code/area_layers.py` → `outputs/layers/<name>/{buildings,places,shelters}.geojson` + summary. Places/shelters = new layers in `cache/osm_study_region.gpkg` (`osm_data.build_extra`, one pass over the extracts, built on first use or `python osm_data.py --extra`). Shelter `cap` = GHS-OBAT floor area (area × floors) inside the OSM outline (point: building within 25 m) × 0.5 / 3.5 m² (Sphere): assumption. Max 300k buildings.
-- GeoJSON copies: `evac_sim.py` writes `roads_/cells_<HHh_weather>.geojson` (+ `files.roads_geojson/cells_geojson`); `code/export_geojson.py` writes `outputs/roads/geojson/<AOI>.geojson`, `outputs/interp/geojson/<pair>.geojson` (listed in `/roads`, `/interp` `files.*_geojson`); `region.py` writes `outputs/region/study_region.geojson`.
-- Tests (2026-10-30, test build :8091, `code/testrun.sh fa`): cargo test 5/5; Q8 bbox 200 (7 s, 57,749 cells); /region aoi EMSR517_AOI18_GRA 26.7 km² 2,666 cells, suffix optional, unknown → 422; /timeline whatif ref bbox: cells_geojson 96 cells, 94 ids in /region cells (rest dry, risk < 0.2); series discharge 40/300/420 → T 3.9/100/480; reuse 4.9 s → 0.04 s, changed body reruns, works under ?async=1, errors not stored; /evacuation roads_geojson 57 lines; /roads /interp geojson, study_region.geojson OK. Not tested (user: skip): /layers, old-vs-new parity.
-- `code/testrun.sh`: also excludes AI-Challenge/, policy_api/, docs/ (were uploaded to every test copy: 245 MB policy_api/target, private docs).
+- `POST /layers {name, region}` → `models/area_layers.py` → `outputs/layers/<name>/{buildings,places,shelters}.geojson` + summary. Places/shelters = new layers in `cache/osm_study_region.gpkg` (`osm_data.build_extra`, one pass over the extracts, built on first use or `python osm_data.py --extra`). Shelter `cap` = GHS-OBAT floor area (area × floors) inside the OSM outline (point: building within 25 m) × 0.5 / 3.5 m² (Sphere): assumption. Max 300k buildings.
+- GeoJSON copies: `evac_sim.py` writes `roads_/cells_<HHh_weather>.geojson` (+ `files.roads_geojson/cells_geojson`); `models/export_geojson.py` writes `outputs/roads/geojson/<AOI>.geojson`, `outputs/interp/geojson/<pair>.geojson` (listed in `/roads`, `/interp` `files.*_geojson`); `region.py` writes `outputs/region/study_region.geojson`.
+- Tests (2026-10-30, test build :8091, `models/testrun.sh fa`): cargo test 5/5; Q8 bbox 200 (7 s, 57,749 cells); /region aoi EMSR517_AOI18_GRA 26.7 km² 2,666 cells, suffix optional, unknown → 422; /timeline whatif ref bbox: cells_geojson 96 cells, 94 ids in /region cells (rest dry, risk < 0.2); series discharge 40/300/420 → T 3.9/100/480; reuse 4.9 s → 0.04 s, changed body reruns, works under ?async=1, errors not stored; /evacuation roads_geojson 57 lines; /roads /interp geojson, study_region.geojson OK. Not tested (user: skip): /layers, old-vs-new parity.
+- `models/testrun.sh`: also excludes AI-Challenge/, policy_api/, docs/ (were uploaded to every test copy: 245 MB policy_api/target, private docs).

@@ -2,8 +2,8 @@
 working_data/
 processed/
 datasets_challenge.zip
-code/cache/
-code/outputs/
+models/cache/
+models/outputs/
 flood_api/out/
 *.log
 # environments / build

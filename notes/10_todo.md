@@ -4,7 +4,7 @@
 - [x] Drop or rename `expected_people_flooded_approx` (risk is a ranking, not a probability) → "risk-weighted population index"
 - [x] Wire `types.rs` `RegionResponse` into `main.rs` (caveats + sources in output)
 - [x] Compute per-cell `factors` + `overall`: flooded_pct, people, likelihood; others `NotAvailable`
-- [x] Out-of-distribution check: % cells outside training 1–99 pct (`code/risk/features.pkl`), river_points, nearest training AOI
+- [x] Out-of-distribution check: % cells outside training 1–99 pct (`models/cache/risk_features_osm.pkl`), river_points, nearest training AOI
 - [x] Fill `ScenarioSummary` (rp10/100/500); use `options.top_n` instead of hard-coded 20
 - [x] Label facility distances as straight-line (travel time via OSRM later)
 - [x] Write `.npy` via `grid_io` layout instead of `features.csv`
@@ -15,7 +15,7 @@
 - [x] Fix EFAS ≤1 px shift in `risk_model.py` (`from_bounds(...).round_offsets().round_lengths()`), then `--rebuild` + retrain; reported AUCs will change
 - [ ] Test EMSR517 AOI05/06 and EMSR518 AOI01/02 (NRW + Belgium OSM extracts downloaded 2026-10-29)
 - [ ] Validate API vs Python on all 8 kept AOIs (feature diffs + AUC), not just EMSR517 AOI15
-- [x] (retrained on OSM rivers, code/NOTES.md) Close river drift (dist_river 242 m OSM vs 768 m CEMS): try OSM filters (e.g. drop small `stream`s), keep the one closest to CEMS
+- [x] (retrained on OSM rivers, models/NOTES.md) Close river drift (dist_river 242 m OSM vs 768 m CEMS): try OSM filters (e.g. drop small `stream`s), keep the one closest to CEMS
 
 ## 2. AI layer (design: [09_ai_layer.md](09_ai_layer.md))
 - [ ] `RegionResponse` → facts list `{id, text, value, unit, source, origin}`
@@ -25,7 +25,7 @@
 - [ ] Pass model limits as facts (weak held-out AUC in EMSR517 AOI20/09/07, OSM vs CEMS rivers, GHS-POP 1 km, OSM = today)
 - [ ] Log prompt/output/validation to `out/<name>/ai_log.json`
 
-## 2b. Evacuation × money (see code/NOTES.md §14, `pipeline.py`)
+## 2b. Evacuation × money (see models/NOTES.md §14, `pipeline.py`)
 - [ ] Add € damage per 1 km cell to `evacuation_<flood>.csv` (JRC curves × €1,500/m² placeholder); evacuation doesn't reduce building damage
 - [ ] Optional scenario "€ saved by early warning" (contents/cars moved): needs a sourced reduction %, declare as external + assumption
 - [ ] No lives-saved model exists; would need an external depth→fatality rate + evacuation success rate
@@ -39,7 +39,7 @@
 - [x] (done by cems-efas-72 2026-10-30, /region + /flood) Add missing Annex 2 caveats to `types::CAVEATS` / `flood_tool.CAVEATS`: EMS = snapshot not peak, outside AOI = not mapped, EFAS skips rivers < 500 km² + 500-yr is the ceiling (2021 exceeded it), OBAT undercounts Belgium, GHS-POP = residents only
 - [ ] Write the policy brief (Annex 6 template, ≥1–2 figures, references with URL+date) and the AI sheet (Annex 7: team number only, ≤5 AI errors, 3 prompts, checks, limits)
 - [ ] Submit by 13:30 Day 2 to JRC-SI@ec.europa.eu + info@fari.brussels; upload outputs to `gs://outputs_challenge/team-XX/`
-- [x] (done by cems-efas-72) Remove `/home/nasr` paths from code/NOTES.md + notes/13 before quoting prompts (no personal data)
+- [x] (done by cems-efas-72) Remove `/home/nasr` paths from models/NOTES.md + notes/13 before quoting prompts (no personal data)
 
 ## 4. Help a friend (notes/11)
 - [x] Restart the 8080 server to load the new endpoints (now hosted on valencia, see notes/12) (help + models)

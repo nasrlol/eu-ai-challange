@@ -2,10 +2,10 @@
 # Run a test on valencia in an isolated copy of the repo, never on the laptop
 # and never in ~/hackathon (that tree backs the live flood-api service).
 #
-#   code/testrun.sh <name> <command...>      e.g. code/testrun.sh s1 .venv/bin/python code/evaluate.py
-#   code/testrun.sh --status                 who holds which slot, free RAM
-#   code/testrun.sh --stop <name>            kill a running job (e.g. before restarting a server)
-#   code/testrun.sh --pull <name> <dir>      copy remote code/outputs back to a local dir
+#   models/testrun.sh <name> <command...>    e.g. models/testrun.sh s1 .venv/bin/python models/evaluate.py
+#   models/testrun.sh --status               who holds which slot, free RAM
+#   models/testrun.sh --stop <name>          kill a running job (e.g. before restarting a server)
+#   models/testrun.sh --pull <name> <dir>    copy remote models/outputs back to a local dir
 #
 # Limits: 2 slots at once (flock), 5 GB RAM + 3 cores per job (cgroup), 2 h timeout (TESTRUN_TIMEOUT=12h to override).
 # TEST_PORT=8081/8082 (by slot) is exported for jobs that start a server.
@@ -13,7 +13,7 @@ set -euo pipefail
 
 HOST=valencia
 BASE=hackathon-test
-LIVE=hackathon
+LIVE=fari-flood-simulator/hackathon
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 if [[ "${1:-}" == "--status" ]]; then
@@ -25,7 +25,7 @@ if [[ "${1:-}" == "--stop" ]]; then
   exit 0
 fi
 if [[ "${1:-}" == "--pull" ]]; then
-  rsync -a "$HOST:$BASE/$2/code/outputs/" "$3/"
+  rsync -a "$HOST:$BASE/$2/models/outputs/" "$3/"
   exit 0
 fi
 
@@ -36,7 +36,7 @@ dest="$BASE/$name"
 ssh "$HOST" "mkdir -p ~/$dest && ln -sfn ~/$LIVE/working_data ~/$dest/working_data && ln -sfn ~/$LIVE/.venv ~/$dest/.venv"
 rsync -a --delete \
   --exclude .git --exclude .venv --exclude working_data --exclude 'flood_api/target' \
-  --exclude 'code/outputs' --exclude __pycache__ --exclude '*.zip' \
+  --exclude 'models/outputs' --exclude __pycache__ --exclude '*.zip' \
   --exclude AI-Challenge --exclude policy_api --exclude docs \
   "$ROOT/" "$HOST:$dest/"
 
@@ -51,4 +51,4 @@ ssh "$HOST" "cd ~/$dest && for s in 1 2; do
       : > ~/$BASE/.slot\$s.who; exit \$rc
     fi
   done
-  echo 'both slots busy, run: code/testrun.sh --status' >&2; exit 75"
+  echo 'both slots busy, run: models/testrun.sh --status' >&2; exit 75"

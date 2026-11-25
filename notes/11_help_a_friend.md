@@ -8,7 +8,7 @@ A person with a disability in a risk zone asks for help → 3 closest volunteer 
 | Routing | Own router (`roads.rs`): OSM roads from Geofabrik extracts, Dijkstra; edges with EFAS depth > 0.3 m (scenario, default rp100) get +5 s per flooded metre (same for every mode), so used only if unavoidable → `flooded_m` |
 | Sign-up | On demand only; no pre-registry of disabled people |
 | Deep water | `water_now: true` → status `escalated`, "call 112", no volunteer |
-| Demo | Synthetic, EMSR517 AOI15 (`code/help_demo.py`) |
+| Demo | Synthetic, EMSR517 AOI15 (`models/help_demo.py`) |
 
 ## API (`flood_api/src/help.rs`, SQLite `out/help.sqlite`)
 `POST /help/zones {name,bbox}` · `POST /helpers {zone,lon,lat,mode:walk|bike|car}` · `PATCH /helpers/{id}` · `POST /help-requests {zone,lon,lat,need,urgent?,scenario?,water_now?}` · `POST /help-requests/{id}/accept {helper_id}` · `GET /help-requests/{id}` · `POST /help-requests/{id}/close`

@@ -2,14 +2,14 @@
 
 **Result:** all routes tested on valencia test build (commit c7742c0). 23 bugs/gaps found, 22 fixed + verified, 1 known limit (B11). Next: live :8080 redeploy (hackathon-77) — waiting for the user's explicit OK — then frontend wiring (hackathon-e9, notes/15).
 
-Goal: every feature in notes/08, 11, 12 and code/NOTES.md is reachable and correct through the Rust API (`flood_api`).
+Goal: every feature in notes/08, 11, 12 and models/NOTES.md is reachable and correct through the Rust API (`flood_api`).
 Coordinator: session hackathon-41 owns the tables above "## Open decisions (user)
 - Hosting: tailnet-only vs public; public needs auth (help routes hold location/need data), restricted `FLOOD_CORS_ORIGINS`, HTTPS. Frontend (hackathon-e9) will require the API.
 - Public repo: e6902b5 already pushed notes/12 + old 13_test_resources (valencia hostname/IP); notes/12/13/14 held back.
 - Build unbuilt features from the gap audit? (fuller /region RegionResponse, AI layer, € saved, rescue allocation)
 
 ## Coverage check (16:22)
-- Every bug ID B1–B11, G1–G6, E1–E6 appears in this file; fixes documented in notes/08 (Rust API), 11 (help), code/NOTES.md (Python, steps 17–18).
+- Every bug ID B1–B11, G1–G6, E1–E6 appears in this file; fixes documented in notes/08 (Rust API), 11 (help), models/NOTES.md (Python, steps 17–18).
 - Sessions: results sections for cems-efas-da, hackathon-12, -11, cems-efas-8c, -77; hackathon-56 work in notes/08 + 11; hackathon-22 in notes/14; hackathon-e9 in notes/15; hosting in notes/12.
 
 ## Results"; each tester only appends to its own `### <session>` section under "## Results" (small Edits, no rewrites). Test server: `http://valencia.tail142ce3.ts.net:8081` (testrun slot `srv`, restarts via hackathon-22; never touch live :8080). Laptop 8081 retired (out of RAM).
@@ -18,11 +18,11 @@ Rule: every heavy call goes through `flock flood_api/out/heavy.lock curl ...` (f
 | Area | Endpoints | Tester | Status |
 |---|---|---|---|
 | Build + /evacuation route + test server, Rust fixes | `POST /evacuation`, server on 8081 | hackathon-56 | all Rust bugs fixed locally; laptop 8081 stopped; on call |
-| Python fixes, CLI vs API parity | `code/*.py` | cems-efas-da | CLI references in `code/outputs/eval/api_reference.json` (bbox 7.05,50.52,7.12,50.56; ints exact, floats ±0.5 %); on call for Python fixes |
+| Python fixes, CLI vs API parity | `models/*.py` | cems-efas-da | CLI references in `models/outputs/eval/api_reference.json` (bbox 7.05,50.52,7.12,50.56; ints exact, floats ±0.5 %); on call for Python fixes |
 | Region | `GET /health`, `POST /region` | hackathon-12 | **done**: all /region FAILs pass on valencia (see Results) |
 | Help a friend + shelters | `/help/*`, `/helpers*`, `/help-requests*` | hackathon-11 | **done**: B2–B7, B10 verified; persistence across restart PASS |
 | Models I | `GET /models`, `POST /flood`, `POST /timeline`, `GET /impact` | hackathon-77 (was 22) | **done**: 72/74 PASS (/models, /flood all options + G4, /timeline peak = /flood, /impact, 14 error cases); found E6, B11 |
-| Resources: test server on valencia (`code/testrun.sh`), heavy-call lock | — | hackathon-22 | valencia test server up (restart 16:07: all Rust fixes B1–B9, G1–G3, E1–E5) |
+| Resources: test server on valencia (`models/testrun.sh`), heavy-call lock | — | hackathon-22 | valencia test server up (restart 16:07: all Rust fixes B1–B9, G1–G3, E1–E5) |
 | Models II + doc audit | `GET /roads/:aoi`, `GET /interp/:aoi`, `POST /evacuation`; notes ↔ API gaps | cems-efas-8c | **done**: B1/G1/G2/E1–E5 verified, parity + congestion (EMSR518 AOI01, max v/c 2.59) PASS; found G6 |
 | Frontend integration (after campaign) | `AI-Challenge/` (separate repo, gitignored here) | hackathon-e9 | waiting for campaign close |
 | Hosted | all, on valencia | hackathon-77 | ready (data + deps on valencia, runs tree ~15:45 without /evacuation); redeploy after local pass |
@@ -61,7 +61,7 @@ Rule: every heavy call goes through `flock flood_api/out/heavy.lock curl ...` (f
 ## Results
 
 ### cems-efas-da (Python owner)
-- CLI references for parity: `code/outputs/eval/api_reference.json`; bbox 7.05,50.52,7.12,50.56 (EMSR517 AOI15, 22.1 km², 5,023 buildings); runs `ref_flood`, `ref_timeline`, `ref_evac` (do not overwrite).
+- CLI references for parity: `models/outputs/eval/api_reference.json`; bbox 7.05,50.52,7.12,50.56 (EMSR517 AOI15, 22.1 km², 5,023 buildings); runs `ref_flood`, `ref_timeline`, `ref_evac` (do not overwrite).
 - Key reference values: /flood rp100 449 flooded / 522 cut off, evac now 710 / early 1,102; /timeline whatif peak 100 (H+12) 0.91 km², 22.94 km roads closed; /impact EMSR518 AOI02 38 buildings, €3.25 M; /evacuation 03h dry 1,263 evacuees / 427 cars / p95 3.25 h.
 - Internal consistency PASS: timeline peak T=100 = /flood rp100 = /evacuation building counts (449 / 522).
 - E1 fixed in `evac_sim.py` + `access_model.flood_mask` guard; CLI check PASS (bbox + observed → exit 1; AOI + observed works; reference unchanged).
@@ -100,8 +100,8 @@ Rule: every heavy call goes through `flock flood_api/out/heavy.lock curl ...` (f
 - Update: cost_s is as intended (B3 = +5 s per flooded m: 187 + 187×5 ≈ 1,120 s, notes/11). Stray `""` zone → B10, row deleted at the announced restart; after it: check persistence of R1–R4 and retest B10 (empty name → 422).
 
 ### cems-efas-8c (Models II: `/roads`, `/interp`, `/evacuation`, `/files`; gap audit)
-- Gap audit (notes + code/NOTES.md vs routes) → G1, G2 and "Gaps from audit" above.
-- Laptop 8081: `/roads` + `/interp`, 19 AOIs (notes/02 + 03) + `_GRA`/`_DEL` names: row counts = `code/outputs/roads|interp` CSVs; 10 FAIL → B1 (prefix match). `/evacuation`: 25 valid runs + 23 bad inputs → E1–E5.
+- Gap audit (notes + models/NOTES.md vs routes) → G1, G2 and "Gaps from audit" above.
+- Laptop 8081: `/roads` + `/interp`, 19 AOIs (notes/02 + 03) + `_GRA`/`_DEL` names: row counts = `models/outputs/roads|interp` CSVs; 10 FAIL → B1 (prefix match). `/evacuation`: 25 valid runs + 23 bad inputs → E1–E5.
 - Valencia 8081 (fix builds): B1, E1–E5, G1, G2 PASS.
   | Check | Got |
   |---|---|
@@ -110,7 +110,7 @@ Rule: every heavy call goes through `flock flood_api/out/heavy.lock curl ...` (f
   | G1 `/files` | viewer.html, gpkg, pdf, json 200 with correct content types; 11 traversal variants → 404; `GET /files/` root → 404 (subfolders list) |
   | Parity vs `api_reference.json` (bbox 7.05–7.12 E, 50.52–50.56 N, rp100, roads none, 3/17 h × dry/heavy_rain) | identical: 449 flooded / 522 cut off; 03h_dry 1,263.49 evacuees, p95 3.25 h; 17h_dry 864.49 / 2.31 h; heavy rain 3.31 / 2.39 h |
   | Plausibility (5 weathers × 4 hours, weekend, roads_flood none→rp500) | p95 03h: dry 3.25 < rain 3.27 < fog 3.30 < heavy_rain 3.31 < snow 3.37; weekend 08h 1,197 evacuees vs weekday 931; boat/air 6.5 → 693 → 972 → 984 |
-  | Congestion `test8c_cong_EMSR518_AOI01` (5.55–5.95 E, 50.55–50.66 N, 97.5 % in EMSR518 AOI01; rp100, roads none) | 25 s; 173,031 bldgs; 03h dry 64,430 evacuees, 0.49 km congested, p95 6.0 h; 08h dry 3.41 km / 6.22 h; 08h heavy_rain 5.61 km / 7.36 h; max v/c 2.59; = code/NOTES.md §17 |
+  | Congestion `test8c_cong_EMSR518_AOI01` (5.55–5.95 E, 50.55–50.66 N, 97.5 % in EMSR518 AOI01; rp100, roads none) | 25 s; 173,031 bldgs; 03h dry 64,430 evacuees, 0.49 km congested, p95 6.0 h; 08h dry 3.41 km / 6.22 h; 08h heavy_rain 5.61 km / 7.36 h; max v/c 2.59; = models/NOTES.md §17 |
 - New, reported to hackathon-41: `/flood` same name twice (rp100, then rp10) lists the stale `danger_/evacuation_rp100.csv` too (handler globs the folder).
 - Not covered: weekend × congestion; `/flood` and `/timeline` belong to Models I.
 - Final build: G6 PASS (`/flood` test8c_g6 rp100 then rp10 → 2nd lists only rp10 in danger/evacuation/floods). CORS (G5) PASS: OPTIONS preflight on `/help-requests` POST, `/helpers/1` PATCH, `/files/…` GET, `/evacuation` POST → 200, `access-control-allow-origin: *`, methods GET,POST,PATCH, header content-type; plain GET with Origin also gets allow-origin; DELETE not in allowed methods.

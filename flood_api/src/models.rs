@@ -1,4 +1,4 @@
-//! Endpoints for the Python models in code/. Region models (flood_tool, timeline, pipeline) run
+//! Endpoints for the Python models in models/. Region models (flood_tool, timeline, pipeline) run
 //! on request as subprocesses, like the scorer in /region; models trained on the CEMS AOIs
 //! (road_model, interp_model, evaluate, report) serve their stored outputs.
 use anyhow::{bail, Context, Result};
@@ -12,8 +12,8 @@ use std::{path::PathBuf, process::Command};
 #[derive(Clone)]
 pub struct Models {
     pub python: PathBuf,
-    /// code/ folder: scripts, and their results in code/outputs
-    pub code: PathBuf,
+    /// models/ folder: scripts, and their results in models/outputs
+    pub models: PathBuf,
     pub data: PathBuf,
 }
 
@@ -40,7 +40,7 @@ enum Region {
 
 impl Models {
     fn out(&self) -> PathBuf {
-        self.code.join("outputs")
+        self.models.join("outputs")
     }
 
     fn public(&self, v: Value) -> Value {
@@ -72,10 +72,10 @@ impl Models {
         })
     }
 
-    /// Run a script in code/; on failure return only its last stderr line (the scripts exit with a
+    /// Run a script in models/; on failure return only its last stderr line (the scripts exit with a
     /// one-line message; for an uncaught exception that is the exception line, not the traceback)
     fn python(&self, script: &str, args: &[String]) -> Result<String> {
-        let out = Command::new(&self.python).arg(self.code.join(script)).args(args).current_dir(&self.code)
+        let out = Command::new(&self.python).arg(self.models.join(script)).args(args).current_dir(&self.models)
             .output().with_context(|| format!("run {script}"))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr);
@@ -103,7 +103,7 @@ impl Models {
     }
 }
 
-/// Replace every absolute path under `outputs` (code/outputs) in a response with its /files/ URL
+/// Replace every absolute path under `outputs` (models/outputs) in a response with its /files/ URL
 pub fn public(mut v: Value, outputs: &std::path::Path) -> Value {
     fn walk(v: &mut Value, root: &str) {
         match v {
@@ -187,7 +187,8 @@ fn flood(m: &Models, req: FloodReq) -> Result<Value> {
     }
     m.python("flood_tool.py", &args)?;
     let dir = m.out().join("regions").join(&req.name);
-    let mut summary: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("summary.json"))?)?;
+    let summary_path = dir.join("summary.json");
+    let mut summary: Value = serde_json::from_str(&std::fs::read_to_string(&summary_path).with_context(|| format!("read {}", summary_path.display()))?)?;
     // per-flood tables of THIS request (the folder may hold older runs under the same name):
     // danger_<label>.csv (factors), evacuation_<label>.csv (ranked cells); label as in
     // access_model.flood_label, e.g. risk>=0.5 → risk_ge_0.5
@@ -273,7 +274,7 @@ fn evacuation(m: &Models, mut req: EvacReq) -> Result<Value> {
     }
     m.python("evac_sim.py", &args)?;
     let path = m.out().join("evacuations").join(&req.name).join("summary.json");
-    Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+    Ok(serde_json::from_str(&std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?)?)
 }
 
 #[derive(Deserialize)]
@@ -305,7 +306,7 @@ fn layers(m: &Models, req: LayersReq) -> Result<Value> {
     let args = vec!["--region".into(), m.region_arg(&req.region, &req.name)?, "--name".into(), req.name.clone()];
     m.python("area_layers.py", &args)?;
     let path = m.out().join("layers").join(&req.name).join("summary.json");
-    Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
+    Ok(serde_json::from_str(&std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?)?)
 }
 
 fn h24() -> f64 { 24.0 }
@@ -403,7 +404,7 @@ fn impact(m: &Models, req: ImpactReq) -> Result<Value> {
     if log.contains("No building data available") {
         bail!("no GHS-OBAT building data for {}", req.aoi);
     }
-    let summaries: Value = serde_json::from_str(&std::fs::read_to_string(&json_path)?)?;
+    let summaries: Value = serde_json::from_str(&std::fs::read_to_string(&json_path).with_context(|| format!("read {}", json_path.display()))?)?;
     Ok(json!({"aoi": req.aoi, "floods": summaries,
               "caveat": "Placeholder replacement cost; JRC Europe depth-damage curves; GHS-OBAT use codes assumed (1 residential, 2 non-residential)."}))
 }
@@ -462,7 +463,7 @@ fn interp(m: &Models, aoi: &str) -> Result<Value> {
               "files": {"extents": dir.join("extents.gpkg"), "extents_geojson": geojson_for(&dir, aoi)}}))
 }
 
-/// Browser copies written by code/export_geojson.py (<dir>/geojson/<AOI or pair>.geojson) for this AOI,
+/// Browser copies written by models/export_geojson.py (<dir>/geojson/<AOI or pair>.geojson) for this AOI,
 /// keyed by file stem; empty when not exported
 fn geojson_for(dir: &std::path::Path, aoi: &str) -> std::collections::BTreeMap<String, PathBuf> {
     std::fs::read_dir(dir.join("geojson")).into_iter().flatten().flatten()
@@ -478,7 +479,7 @@ fn impact_all(m: &Models) -> Result<Value> {
               "files": {"pdf": m.out().join("report/flood_summary.pdf")}}))
 }
 
-/// Read-only download of a result file (or a folder listing) under code/outputs
+/// Read-only download of a result file (or a folder listing) under models/outputs
 async fn files(State(m): State<Models>, PathArg(rel): PathArg<String>) -> Response {
     let not_found = || (StatusCode::NOT_FOUND, Json(json!({"error": "no such file under outputs"}))).into_response();
     let Ok(root) = std::fs::canonicalize(m.out()) else { return not_found() };

@@ -1,5 +1,5 @@
 //! Data structures of the /region response, the npy handoff to the Python scorer and the
-//! explained danger per cell. Mirrors code/grid_io.py (npy row layout), risk_model.py (FEATURES,
+//! explained danger per cell. Mirrors models/grid_io.py (npy row layout), risk_model.py (FEATURES,
 //! 0.5 threshold) and access_model.py (factor thresholds, overall level). Change those and this
 //! file together.
 use crate::features::{FEATURES, GRID_M};
@@ -166,7 +166,7 @@ pub struct RegionResponse {
     /// In the 0.02° pad around it (still used for distances)
     pub facilities_nearby_outside: BTreeMap<String, usize>,
     pub risk: Option<RiskSummary>,
-    /// How far the region is from the training data (code/score_region.py); null without scoring
+    /// How far the region is from the training data (models/score_region.py); null without scoring
     pub region_check: Option<Value>,
     pub files: Files,
     pub sources: &'static [Source],

@@ -4,10 +4,10 @@
 |---|---|
 | Host | `valencia` (Arch, x86_64, 8 cores, 23 GB RAM), Tailscale `valencia.tail142ce3.ts.net` / 100.108.90.108 |
 | URL | `http://valencia.tail142ce3.ts.net:8080` (**tailnet only**, not public) |
-| Code | `~/hackathon`: git checkout of nasrlol/eu-ai-challange, branch `api-help-shelters-models` (https, read-only: valencia has no GitHub key) |
-| Data | all of `working_data/` (18 GB) + `code/cache` + `code/outputs` |
+| Code | `~/fari-flood-simulator/hackathon`: git checkout of nasrlol/eu-ai-challange, branch `main` (https, read-only: valencia has no GitHub key) |
+| Data | all of `working_data/` (18 GB) + `models/cache` + `models/outputs` |
 | Service | systemd `flood-api` (`FLOOD_ADDR=100.108.90.108:8080`, restart on failure, starts at boot) |
-| Python | `~/hackathon/.venv` via uv, 3.12, versions pinned to the local venv (sklearn 1.9.1 must match `model.joblib`) |
+| Python | `~/fari-flood-simulator/hackathon/.venv` via uv, 3.12, versions pinned to the local venv (sklearn 1.9.1 must match `model.joblib`) |
 | Rust | Arch `rust` package; build `cd flood_api && cargo build --release` |
 
 - Update: rsync code → `cargo build --release` → `sudo systemctl restart flood-api`. Logs: `journalctl -u flood-api -f`.
@@ -16,17 +16,17 @@
 | What | Value |
 |---|---|
 | URL | `http://valencia.tail142ce3.ts.net:8081` (tailnet only) |
-| Code | `~/hackathon-test/srv`: same git checkout (still refreshed by rsync via `code/testrun.sh`; `working_data`, `.venv` symlinked to `~/hackathon`, in `.git/info/exclude`) |
-| Out | `FLOOD_OUT=~/hackathon-test/srv_out` (`help.sqlite`, survives restarts); `code/outputs` seeded from laptop |
+| Code | `~/hackathon-test/srv`: same git checkout (still refreshed by rsync via `models/testrun.sh`; `working_data`, `.venv` symlinked to `~/fari-flood-simulator/hackathon`, in `.git/info/exclude`) |
+| Out | `FLOOD_OUT=~/hackathon-test/srv_out` (`help.sqlite`, survives restarts); `models/outputs` seeded from laptop |
 | Limits | `systemd-run --user --scope`: 5 GB RAM, no swap, 3 CPUs, nice 10, 12 h timeout; 2 slots via flock |
 | History | 15:58 first build (B1/G1/G2), 16:06 restart (B2–B9, E2–E5, G3), hot-sync G4 (no restart), 16:20 final restart under heavy.lock (B10, G5 CORS, G6, E6; empty-named zone deleted; CORS preflight OK) |
 
-- Restart: ask hackathon-11 → `flock flood_api/out/heavy.lock code/testrun.sh --stop srv` → rerun. Python-only fixes: rsync `code/*.py` under the same lock, no restart.
+- Restart: ask hackathon-11 → `flock flood_api/out/heavy.lock models/testrun.sh --stop srv` → rerun. Python-only fixes: rsync `models/*.py` under the same lock, no restart.
 - Live :8080 and the Java server are never touched by tests.
 
 - Not done: public exposure via nginx (no auth on the API; help endpoints hold health-related data → keep tailnet-only unless auth added).
 
-- 2026-10-29 21:53 + 21:58 (cems-efas-72, user OK): live :8080 redeployed with everything up to /region v2, async jobs, DELETE routes, B12. Synced code/notes only (rsync excludes code/outputs, code/cache, flood_api/out → live help.sqlite kept); model/outputs md5 = laptop. Smoke: /health, /models, /impact, CORS, async, DELETE 404, inverted bbox 422.
+- 2026-10-29 21:53 + 21:58 (cems-efas-72, user OK): live :8080 redeployed with everything up to /region v2, async jobs, DELETE routes, B12. Synced code/notes only (rsync excludes models/outputs, models/cache, flood_api/out → live help.sqlite kept); model/outputs md5 = laptop. Smoke: /health, /models, /impact, CORS, async, DELETE 404, inverted bbox 422.
 
 ## Frontend (2026-10-30, cems-efas-72, user request)
 | What | Value |
@@ -55,21 +55,21 @@
 - Help endpoints (help-requests, helpers) are now public with no auth.
 - api.dev.nsrddyn.com: staged then dropped (user, 2026-10-30): API stays as paths /api, /policy on dev.nsrddyn.com.
 
-## Server dirs under git (2026-10-30, user request)
+## Server dirs under git (2026-10-30, user request; moved under `~/fari-flood-simulator/` 2026-11-25)
 | Dir | Repo / branch |
 |---|---|
-| `~/hackathon`, `~/hackathon-test/srv` | nasrlol/eu-ai-challange `api-help-shelters-models` (git init in place + `reset` to origin, files untouched) |
-| `~/frontend` | sistahoppet/AI-Challenge **`main`** (59d2942); `frontend-perf` deleted locally + on valencia (its last commit ef59419 superseded: main defaults to `https://dev.nsrddyn.com/api`) |
-| `~/policy_api` | nasrlol/flood-policy-advisor `main` |
+| `~/fari-flood-simulator/hackathon`, `~/hackathon-test/srv` | nasrlol/eu-ai-challange `main` |
+| `~/fari-flood-simulator/frontend` | sistahoppet/AI-Challenge **`main`** |
+| `~/fari-flood-simulator/policy_api` | nasrlol/flood-policy-advisor `main` |
 - Update: push from laptop → `ssh valencia 'cd <dir> && git pull'` (+ cargo build / restart for Rust). Code = branch; only `notes/` on valencia is older (diff left, not overwritten).
 - Smoke after switch: :5500 200, dev.nsrddyn.com 200, /api/health ok, flood-api + policy-api active.
-- 2026-10-30 cleanup: challenge annexes, team .docx/.pptx and drive-download zips untracked → local `docs/` (gitignored with `*.zip`); still in git history. Team notebook → `starter_notebook/how_to_get_started_ems.ipynb`.
-- Frontend CD (after AI-Challenge#1 merges): `~/frontend` on branch `live`, systemd `frontend-deploy.timer` pulls every minute; no manual `git pull` needed.
+- 2026-10-30 cleanup: challenge annexes, team .docx/.pptx and drive-download zips untracked → local `docs/` (gitignored with `*.zip`); still in git history.
+- Frontend CD (after AI-Challenge#1 merges): `~/fari-flood-simulator/frontend` on branch `live`, systemd `frontend-deploy.timer` pulls every minute; no manual `git pull` needed.
 
 ## CI/CD for the APIs (2026-10-30, user request)
 | API | Workflow | CD unit (valencia) | Verify |
 |---|---|---|---|
-| flood_api (this repo) | `.github/workflows/flood-api.yml`: cargo build + test, `py_compile code/*.py`, smoke `/health` `/version` `/models` | `flood_api/deploy/flood-api-deploy.{service,timer}` | `dev.nsrddyn.com/api/version` = commit |
+| flood_api (this repo) | `.github/workflows/flood-api.yml`: cargo build + test, `py_compile models/*.py`, smoke `/health` `/version` `/models` | `flood_api/deploy/flood-api-deploy.{service,timer}` | `dev.nsrddyn.com/api/version` = commit |
 | policy_api | `policy_api/.github/workflows/ci.yml`: cargo build + test, smoke `/health` `/version` `/policies` | `policy_api/deploy/policy-api-deploy.{service,timer}` | `dev.nsrddyn.com/policy/version` = commit |
 - Same pattern as the frontend: green `main` → branch `live` (GITHUB_TOKEN), valencia pulls `live` every minute, `GIT_SHA=<commit> cargo build --release`, `sudo -n systemctl restart`. Done marker `.git/deployed`; failed build → old binary keeps running, retried next minute. Dirty checkout → refuses (needs `git checkout -- .` once on `~/hackathon`).
 - New route `GET /version` in both APIs (`option_env!("GIT_SHA")`, `dev` otherwise).

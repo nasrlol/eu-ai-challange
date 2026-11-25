@@ -35,13 +35,15 @@ jobs:
         run: cargo test --release --locked
 
       - name: Python compiles
-        run: python -m py_compile code/*.py
+        run: python -m py_compile models/*.py
 
       - name: Smoke test (server starts, light routes answer)
         env:
           FLOOD_ADDR: 127.0.0.1:8090
           FLOOD_OUT: ${{ runner.temp }}/out
           FLOOD_DATA: ${{ runner.temp }}/data
+          FLOOD_PYTHON: python
+          FLOOD_SCORER: models/score_region.py
         run: |
           flood_api/target/release/flood_api > server.log 2>&1 &
           for i in $(seq 40); do curl -sf -o /dev/null http://$FLOOD_ADDR/health && break; sleep 0.5; done

@@ -1,5 +1,5 @@
 //! Checks on a requested region before any OSM or raster work: shape, size, and overlap with the
-//! study region (the hull in code/outputs/region/study_region.gpkg, same file and rule as
+//! study region (the hull in models/outputs/region/study_region.gpkg, same file and rule as
 //! flood_tool.py: refuse if more than 1 % lies outside).
 use crate::features::Laea;
 use anyhow::{bail, Context, Result};
@@ -46,7 +46,7 @@ fn outer_rings(b: &[u8]) -> Result<Vec<Vec<Coord>>> {
 
 fn open(gpkg: &Path) -> Result<rusqlite::Connection> {
     rusqlite::Connection::open_with_flags(gpkg, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .with_context(|| format!("{} missing; run python code/region.py", gpkg.display()))
+        .with_context(|| format!("{} missing; run python models/region.py", gpkg.display()))
 }
 
 /// Study region hull, EPSG:3035 (outer ring only: the hull is convex)

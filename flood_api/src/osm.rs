@@ -1,6 +1,6 @@
 //! OpenStreetMap data for a region via Overpass: rivers and water bodies (stand-in for the CEMS
 //! hydrography layers the model was trained on) and emergency facilities.
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{path::Path, time::Duration};
@@ -67,7 +67,7 @@ pub fn fetch(w: f64, s: f64, e: f64, n: f64, pbf_dir: &Path, cache_dir: &Path) -
     let bb = format!("{s:.4},{w:.4},{n:.4},{e:.4}");
     let cache = cache_dir.join(format!("osm_v{CACHE_VERSION}_{}.json", bb.replace(',', "_")));
     if cache.exists() {
-        return Ok(serde_json::from_str(&std::fs::read_to_string(&cache)?)?);
+        return Ok(serde_json::from_str(&std::fs::read_to_string(&cache).with_context(|| format!("read {}", cache.display()))?)?);
     }
     let osm = match pbf_dir.is_dir().then(|| pbf::read(pbf_dir, w, s, e, n)).transpose()?.flatten() {
         Some(osm) => osm,

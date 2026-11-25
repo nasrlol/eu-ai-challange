@@ -8,7 +8,7 @@ Rule: **the LLM never produces a number or an action.** Rust/Python compute fact
 | `expected_people_flooded_approx` = Σ risk×people, but risk is a ranking, not a probability | drop or rename "risk-weighted population index" |
 | ad-hoc `json!` response | wire `types.rs` `RegionResponse` (caveats, sources) |
 | `factors` / `overall` not computed in API | compute flooded_pct, people, likelihood; others `NotAvailable` |
-| no confidence signal | OOD check: % cells with features outside training 1–99 pct (`code/cache/risk_features_osm.pkl`), river_points, nearest training AOI |
+| no confidence signal | OOD check: % cells with features outside training 1–99 pct (`models/cache/risk_features_osm.pkl`), river_points, nearest training AOI |
 | `ScenarioSummary` empty, top_n hard-coded 20 | fill from rp10/100/500, use `options.top_n` |
 | facility distance = straight line | label as such; travel time later (OSRM) |
 

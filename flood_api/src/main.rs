@@ -21,6 +21,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, path::PathBuf, process::Command};
 
+#[derive(Clone)]
 struct Config {
     data: PathBuf,
     out: PathBuf,
@@ -28,15 +29,20 @@ struct Config {
     scorer: PathBuf,
 }
 
-fn config() -> Config {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-    let var = |k: &str, d: PathBuf| std::env::var(k).map(PathBuf::from).unwrap_or(d);
-    Config {
-        data: var("FLOOD_DATA", root.join("working_data")),
-        out: var("FLOOD_OUT", root.join("flood_api/out")),
-        python: var("FLOOD_PYTHON", root.join(".venv/bin/python")),
-        scorer: var("FLOOD_SCORER", root.join("code/score_region.py")),
-    }
+fn config() -> Result<Config> {
+    let req = |k: &str| {
+        let v = std::env::var(k).with_context(|| format!("missing required env var {k}"))?;
+        if v.trim().is_empty() {
+            bail!("env var {k} is empty");
+        }
+        Ok(PathBuf::from(v))
+    };
+    Ok(Config {
+        data: req("FLOOD_DATA")?,
+        out: req("FLOOD_OUT")?,
+        python: req("FLOOD_PYTHON")?,
+        scorer: req("FLOOD_SCORER")?,
+    })
 }
 
 #[derive(Deserialize)]
@@ -109,8 +115,7 @@ fn factors(risk: f32, people: f32, dist_fire: f32, dist_hospital: f32) -> Vec<Fa
     }).collect()
 }
 
-fn run(req: RegionRequest) -> Result<Value> {
-    let cfg = config();
+fn run(cfg: &Config, req: RegionRequest) -> Result<Value> {
     if req.name.is_empty() || !req.name.chars().all(|c| c.is_ascii_alphanumeric() || "_-".contains(c)) {
         bail!("name must be letters, digits, _ or -");
     }
@@ -163,7 +168,7 @@ fn run(req: RegionRequest) -> Result<Value> {
         return Ok(serde_json::to_value(out)?);
     }
 
-    // Score with the trained sklearn model (code/outputs/risk/model.joblib)
+    // Score with the trained sklearn model (models/outputs/risk/model.joblib)
     let scored = dir.join("risk.csv");
     let st = Command::new(&cfg.python).arg(&cfg.scorer).arg(&out.files.grid).arg(&scored).status().context("run scorer")?;
     if !st.success() {
@@ -249,8 +254,7 @@ struct PointQuery {
 const NEAR_M: f64 = 100.0;
 const LOOK_DEG: f64 = 0.003; // ~300 m search window for the nearest water
 
-fn point(q: PointQuery) -> Result<Value> {
-    let cfg = config();
+fn point(cfg: &Config, q: PointQuery) -> Result<Value> {
     let outputs = std::fs::canonicalize(cfg.scorer.parent().context("FLOOD_SCORER has no folder")?)?.join("outputs");
     let (lon, lat, e) = (q.lon, q.lat, LOOK_DEG);
     // the search box gets the same shape / study-region check as /region
@@ -394,12 +398,12 @@ fn store_dir(cfg: &Config) -> PathBuf {
 const STORE_PAD_DEG: f64 = 0.15;
 
 fn cli(cmd: &str, args: &[String]) -> Result<()> {
-    let cfg = config();
+    let cfg = config()?;
     let (pbf_dir, dir) = (cfg.data.join("osm"), store_dir(&cfg));
-    let code = std::fs::canonicalize(cfg.scorer.parent().context("FLOOD_SCORER has no folder")?)?;
+    let models = std::fs::canonicalize(cfg.scorer.parent().context("FLOOD_SCORER has no folder")?)?;
     match cmd {
         "build-osm-store" => {
-            let [w, s, e, n] = region_check::hull_bbox(&code.join("outputs/region/study_region.gpkg"))?;
+            let [w, s, e, n] = region_check::hull_bbox(&models.join("outputs/region/study_region.gpkg"))?;
             let p = STORE_PAD_DEG;
             osm::store::build(&pbf_dir, &dir, [w - p, s - p, e + p, n + p])
         }
@@ -440,22 +444,26 @@ async fn main() -> Result<()> {
         return cli(cmd, &args[2..]);
     }
     let addr = std::env::var("FLOOD_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".into());
-    let cfg = config();
+    let cfg = config()?;
     std::fs::create_dir_all(&cfg.out)?;
     osm::store::init(store_dir(&cfg), &cfg.data.join("osm"));
-    let code = std::fs::canonicalize(cfg.scorer.parent().context("FLOOD_SCORER has no folder")?)?;
-    let outputs = code.join("outputs");
+    let models_dir = std::fs::canonicalize(cfg.scorer.parent().context("FLOOD_SCORER has no folder")?)?;
+    let outputs = models_dir.join("outputs");
     let help = help::Help::open(&cfg.out.join("help.sqlite"), cfg.data.clone(), outputs.join("region/study_region.gpkg"))?;
-    let models = models::Models { python: cfg.python, code, data: cfg.data };
+    let models = models::Models { python: cfg.python.clone(), models: models_dir, data: cfg.data.clone() };
     let jobs = jobs::Jobs::default();
+    let (cfg_region, cfg_point) = (cfg.clone(), cfg.clone());
     let app = Router::new().route("/health", get(|| async { "ok" }))
         // git commit of this build (deploy sets GIT_SHA), checked by CI after a deploy
         .route("/version", get(|| async { option_env!("GIT_SHA").unwrap_or("dev") }))
         .route("/region", post(move |extract::JsonBody(req): extract::JsonBody<RegionRequest>| {
-            let outputs = outputs.clone();
-            blocking(move || run(req).map(|v| models::public(v, &outputs)))
+            let (cfg, outputs) = (cfg_region.clone(), outputs.clone());
+            blocking(move || run(&cfg, req).map(|v| models::public(v, &outputs)))
         }))
-        .route("/point", get(|extract::QueryArgs(q): extract::QueryArgs<PointQuery>| blocking(move || point(q))))
+        .route("/point", get(move |extract::QueryArgs(q): extract::QueryArgs<PointQuery>| {
+            let cfg = cfg_point.clone();
+            blocking(move || point(&cfg, q))
+        }))
         .merge(help::router(help)).merge(models::router(models))
         .route("/jobs/:id", get(jobs::get).with_state(jobs.clone()))
         // reuse inside jobs: an async request with "reuse": true also gets the stored answer
