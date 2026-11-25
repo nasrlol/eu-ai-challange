@@ -70,10 +70,16 @@ pub fn read_window(path: &Path, w: f64, s: f64, e: f64, n: f64) -> Result<Grid> 
     let (tw, th) = dec.chunk_dimensions();
     let (tw, th) = (tw as usize, th as usize);
     let across = (width as usize).div_ceil(tw);
+    // sparse files (EFAS) store all-nodata tiles with 0 bytes: GDAL reads them as nodata, the decoder
+    // would fail with "corrupt deflate stream", so they stay NaN here
+    let sizes = dec.get_tag_u64_vec(Tag::TileByteCounts).unwrap_or_default();
     let mut data = vec![f32::NAN; ww * wh];
     for tr in r0 / th..=r1 / th {
         for tc in c0 / tw..=c1 / tw {
             let idx = (tr * across + tc) as u32;
+            if sizes.get(idx as usize) == Some(&0) {
+                continue;
+            }
             let (dw, _) = dec.chunk_data_dimensions(idx);
             let vals: Vec<f32> = match dec.read_chunk(idx)? {
                 DecodingResult::F32(v) => v,

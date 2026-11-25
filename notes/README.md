@@ -16,7 +16,8 @@
 14. [14_test_resources.md](14_test_resources.md): where tests run (laptop vs valencia), limits, `code/testrun.sh`
 15. [15_frontend_api.md](15_frontend_api.md): wiring the API into the AI-Challenge/ frontend: decisions, status, limits
 16. [16_policy_api.md](16_policy_api.md): policy advisor API (separate repo): model results → which policies (Claude / local / rules), hosting :8082, local-model verdict
-17. [../code/NOTES.md](../code/NOTES.md): build log of the Python models (prompts, methods, results, bugs, decisions, limits). Steps 1–11 data + first models; 12 restructure + roadmap; 13 OSM layers, `flood_tool.py` (any region), DEM depth check; 14 evacuation levels; 15 precision checks + v2 features (`evaluate.py`); 16 `timeline.py` (flood in time + viewer); 17 `evac_sim.py` (human evacuation flow by hour/weather); 18 API test campaign (CLI references, fixes E1, G4). Code layout: `code/paths.py`, results in `code/outputs/`, caches in `code/cache/`
+17. [17_frontend_handoff.md](17_frontend_handoff.md): new API features for the frontend (timeline cells per step, July 2021 driver, reuse, /layers, AOI regions, GeoJSON copies): what to build, fields, limits
+18. [../code/NOTES.md](../code/NOTES.md): build log of the Python models (prompts, methods, results, bugs, decisions, limits). Steps 1–11 data + first models; 12 restructure + roadmap; 13 OSM layers, `flood_tool.py` (any region), DEM depth check; 14 evacuation levels; 15 precision checks + v2 features (`evaluate.py`); 16 `timeline.py` (flood in time + viewer); 17 `evac_sim.py` (human evacuation flow by hour/weather); 18 API test campaign (CLI references, fixes E1, G4). Code layout: `code/paths.py`, results in `code/outputs/`, caches in `code/cache/`
 
 Convention: we refer to areas by AOI code (e.g. EMSR517 AOI15), not by town name.
 
